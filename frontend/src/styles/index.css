@@ -1,0 +1,74 @@
+/* 全局基础样式 + 工业风变量。
+   Element Plus 明/暗由 <html class="dark"> 驱动（ui store / main.js initDarkMode），
+   这里只放应用自己的变量与少量覆盖，不碰 EP 组件内部。 */
+:root {
+  color-scheme: light;
+  /* 左栏控制台深色（固定工业风，不随全局亮暗切换） */
+  --ls-left-bg: #131a26;
+  --ls-left-bg-hi: #1a2332;
+  --ls-left-border: rgba(255, 255, 255, 0.07);
+  --ls-left-fg: #c6cfdd;
+  --ls-left-fg-dim: #74829a;
+  --ls-left-fg-strong: #eef2f8;
+  --ls-accent: #3f7ef7;
+  /* 工作区（右栏 + 明暗随主题） */
+  --ls-bg: #edf0f6;
+  --ls-panel: #ffffff;
+  --ls-border: #dde3ec;
+  --ls-fg: #1f2733;
+  --ls-fg-dim: #7a8494;
+}
+
+html.dark {
+  color-scheme: dark;
+  --ls-left-bg: #10141c;
+  --ls-left-bg-hi: #161d2a;
+  --ls-bg: #0e1117;
+  --ls-panel: #161b25;
+  --ls-border: #262e3c;
+  --ls-fg: #dfe5ee;
+  --ls-fg-dim: #8a93a5;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body,
+#app {
+  height: 100%;
+  margin: 0;
+}
+
+body {
+  font-family: 'Inter', 'PingFang SC', 'Microsoft YaHei', system-ui, sans-serif;
+  background: var(--ls-bg);
+  color: var(--ls-fg);
+  font-size: 14px;
+  -webkit-font-smoothing: antialiased;
+}
+
+/* 细滚动条：贴合工业面板 */
+::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+::-webkit-scrollbar-thumb {
+  background: rgba(120, 130, 150, 0.35);
+  border-radius: 4px;
+}
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+.text-dim {
+  color: var(--ls-fg-dim);
+}
+
+/* 单行省略（任务标题等） */
+.ellipsis {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
