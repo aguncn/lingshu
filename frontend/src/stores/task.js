@@ -8,6 +8,7 @@ import { ElMessage } from 'element-plus'
 
 import { createTaskInSpace, listTasksInSpace } from '../api/tasks'
 import { getTaskCaps, putTaskCaps } from '../api/capabilities'
+import { applyScenario } from '../api/scenarios'
 import { listTaskFiles } from '../api/files'
 import { listChatMessages, sendChatDecision, streamChat } from '../api/chat'
 import { useModelStore } from './model'
@@ -138,9 +139,29 @@ export const useTaskStore = defineStore('task', {
       await this.loadCaps(this.activeTaskId, { force: true })
     },
     async createTask(payload) {
-      // payload: { space_id, title, task_type, visibility? }
-      const task = await createTaskInSpace(payload.space_id, payload) // 失败上抛
-      await this.reloadSpace(payload.space_id) // 成功后重拉该空间 → 新任务入分组
+      // payload: { space_id, title, task_type, visibility?, scenario_domain? }
+      const task = await createTaskInSpace(payload.space_id, {
+        title: payload.title,
+        task_type: payload.task_type,
+        visibility: payload.visibility,
+      }) // 失败上抛
+      // 绑了场景域 → 建任务后自动套用预设：apply 置 task.scenario_domain 并按其预设覆盖挂载 caps。
+      // 套用失败不阻断创建（任务已落库）：降级为「已建未装配」，提示去细节栏手动补挂载。
+      if (payload.scenario_domain) {
+        try {
+          const r = await applyScenario(task.id, payload.scenario_domain)
+          task.scenario_domain = r.domain // 本地任务对象带上域，选中态/细节栏立即可读
+          if (r.skipped && r.skipped.length) {
+            const reasons = [...new Set(r.skipped.map((s) => s.reason))]
+            ElMessage.warning(
+              `任务已创建；该域预设 ${r.skipped.length} 项未能挂载（${reasons.join('、')}），可在细节栏「编辑挂载」补全`,
+            )
+          }
+        } catch (e) {
+          ElMessage.warning(`任务已创建，但场景预设套用失败：${e?.message || '未知错误'}；可稍后手动挂载`)
+        }
+      }
+      await this.reloadSpace(payload.space_id) // 成功后重拉该空间 → 新任务入分组（服务端已持久化域）
       await this.selectTask(task)
       return task
     },

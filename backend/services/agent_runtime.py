@@ -9,7 +9,7 @@
 # 模型解析失败（无绑定/无密钥）直接抛可读 AppError——由端点在 SSE 首事件转为 error。
 import sys
 
-from . import capability, mcp_client, model_factory
+from . import capability, mcp_client, model_factory, scenario_service
 from .task_service import get_task_or_raise
 
 # 基础运维助手人设。仅当任务未挂载可用专家时使用；挂载了单专家则其 system_prompt 覆盖本段角色
@@ -17,6 +17,17 @@ from .task_service import get_task_or_raise
 BASE_SYSTEM_PROMPT = (
     "你是「灵枢」IT 运维智能体。在运维场景中协助排查故障、执行变更、核对日志与配置。"
     "回答保持简洁、步骤可执行；涉及系统改动或写文件前先说明影响。你只能使用提供的工具完成操作。"
+)
+
+# 跨十二域的统一约束段（P9 D5，设计 §9）：仅对绑定了场景域的「域会话」在系统提示末尾收尾追加，
+# 无域任务不注入（保持与 P8 既有拼装逐字一致）。写类工具的二次确认另有 Permission 层机制兜底，
+# 此段是提示级约定，与机制级双保险不冲突。调整约束只改这一处常量（prompts/README.md 有说明）。
+UNIFIED_CONSTRAINTS = (
+    "## 统一约束\n"
+    "- 不臆造数据：不确定或未从工具/资料中获取的信息如实说明，绝不编造数值、日志、命令结果或事实。\n"
+    "- 危险操作二次确认：涉及删除、覆盖、批量改动或生产变更等写操作，先说明影响并等待用户确认后再执行。\n"
+    "- 回答引用来源：结论须标注工具输出、知识库条目或规范出处，便于用户核对。\n"
+    "- 结构化输出：按场景要求以报告/表格/工单等结构化形式输出，便于直接使用与验收。"
 )
 
 # 内置工具（agentscope.tool）。Bash/Write/Edit 属写/执行类，二次确认接法见任务组 5。
@@ -70,8 +81,13 @@ def _expert_role(expert) -> str:
     return text or BASE_SYSTEM_PROMPT
 
 
-def _compose_system_prompt(task, skills, experts) -> tuple[str, list, list]:
-    """按序拼 system_prompt，返回 (prompt, 注入技能名, 注入专家名)。"""
+def _compose_system_prompt(task, skills, experts, scenario=None) -> tuple[str, list, list]:
+    """按序拼 system_prompt，返回 (prompt, 注入技能名, 注入专家名)。
+
+    scenario 为任务所绑域的 ScenarioTemplate（None=无域或模板缺失）。域会话（scenario 非 None）时做
+    增量拼装：域 system_prompt 作最前领域段，既有「专家/基础人设 + 任务上下文 + 技能指令」段照旧居中，
+    末尾追加 UNIFIED_CONSTRAINTS（P9 D5）。无域/模板缺失 → 原样返回既有拼装，绝不因模板问题抛错。
+    """
     expert = next(
         (e for e in experts if e.enabled and (e.system_prompt or "").strip()),
         None,
@@ -88,7 +104,14 @@ def _compose_system_prompt(task, skills, experts) -> tuple[str, list, list]:
     skills_part = _skills_block(skill_texts)
     if skills_part:
         parts.append(skills_part)
-    return "\n".join(parts), used_skills, used_experts
+    prompt = "\n".join(parts)
+
+    if scenario is not None:
+        domain_text = (scenario.system_prompt or "").strip()
+        if domain_text:
+            prompt = f"{domain_text}\n\n{prompt}"
+        prompt = f"{prompt}\n\n{UNIFIED_CONSTRAINTS}"
+    return prompt, used_skills, used_experts
 
 
 def _split_mcp(clients: list) -> tuple[list, list]:
@@ -124,8 +147,10 @@ def build(task_id: int, *, clients=None) -> tuple:
     model, label = model_factory.resolve_model(task_id)  # 无绑定/无密钥 → 可读错
 
     mounted = capability.load_mounted(task.id)  # {skills,mcps,kbs,experts} ORM 对象
+    # P9：任务绑了受控域且模板在库 → 取其行做域注入；无域/模板缺失 → None → 走既有拼装（不阻断）
+    scenario = scenario_service.get_template(task.scenario_domain)
     system_prompt, skill_names, expert_names = _compose_system_prompt(
-        task, mounted["skills"], mounted["experts"]
+        task, mounted["skills"], mounted["experts"], scenario=scenario
     )
 
     # MCP：默认按挂载+可用门控从库装配；测试可注入整块 mock 客户端（task 3.2 允许）

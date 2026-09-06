@@ -36,6 +36,7 @@ export const useUiStore = defineStore('ui', {
     // —— 新建对话框（命令面板与左栏按钮共用同一开关）——
     spaceDialogOpen: false,
     taskDialogOpen: false,
+    taskDialogDomain: '', // 新建任务预选场景域键（顶部十二域条点选写入；''=不绑域手动挂载）
   }),
   actions: {
     toggleDark() {
@@ -59,6 +60,11 @@ export const useUiStore = defineStore('ui', {
     openLibrary() {
       this.activeNavKey = 'library'
       this.libraryOpen = true
+    },
+    // 打开新建任务对话框：可选预选场景域键（顶部域条点选传入；左栏「新建任务」留空=不绑域）
+    openCreateTask(domain = '') {
+      this.taskDialogDomain = domain || ''
+      this.taskDialogOpen = true
     },
   },
 })

@@ -3,16 +3,14 @@
 // 「发送」走真会话 SSE：task store 负责流式渲染/确认/收尾，这里只负责取文本触发。
 // 进行中（流式或等待二次确认）时禁用发送并给出「停止」——停止即断开会话连接，
 // 后端 cancel 当前 run（每任务单活动会话），不会污染下一条消息。
-import { Document, Promotion } from '@element-plus/icons-vue'
+import { Promotion } from '@element-plus/icons-vue'
 import { ElMessage } from 'element-plus'
 import { computed, ref } from 'vue'
 
 import { useModelStore } from '../../stores/model'
-import { usePromptStore } from '../../stores/prompt'
 import { useTaskStore } from '../../stores/task'
 
 const task = useTaskStore()
-const prompt = usePromptStore()
 const model = useModelStore()
 const text = ref('')
 
@@ -59,14 +57,6 @@ function onKeydown(e) {
 
 <template>
   <div class="pi">
-    <!-- 模板选中提示：体现为输入框上方的“选中上下文” -->
-    <div v-if="prompt.selectedPreset" class="pi-preset">
-      <el-icon><Document /></el-icon>
-      <span class="pi-preset-label">已选模板：{{ prompt.selectedPreset.name }}</span>
-      <span class="pi-preset-content text-dim ellipsis">{{ prompt.selectedPreset.content }}</span>
-      <el-button link type="primary" size="small" @click="prompt.clear()">取消</el-button>
-    </div>
-
     <div class="pi-row">
       <div class="pi-context text-dim">
         <template v-if="activeTask">
@@ -110,26 +100,6 @@ function onKeydown(e) {
   padding: 8px 16px 12px;
   border-top: 1px solid var(--ls-border);
   background: var(--ls-panel);
-}
-.pi-preset {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  padding: 6px 10px;
-  margin-bottom: 8px;
-  border-radius: 6px;
-  background: rgba(63, 126, 247, 0.08);
-  color: var(--ls-fg);
-  font-size: 12px;
-}
-.pi-preset-label {
-  flex: none;
-  color: var(--ls-accent);
-  font-weight: 600;
-}
-.pi-preset-content {
-  flex: 1 1 auto;
-  min-width: 0;
 }
 .pi-row {
   display: flex;

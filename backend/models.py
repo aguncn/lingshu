@@ -28,6 +28,25 @@ PRESET_TASK_NAMES = ("写文档", "写代码", "数据分析", "排障")
 MCP_TRANSPORTS = {"stdio", "http"}  # §5.2 AD-02：MCP 传输方式二选一
 KB_STATUSES = {"draft", "ready", "disabled"}  # AD-03：seed 'ready'=可检索；解析/上架生命周期由 P5 细化
 EXPERT_ROLES = {"ops-sme", "general"}  # AD-04：人设领域短标签（单专家 demo，多专家协作 P1 再扩充）
+# —— P9 十二运维场景域（设计 §8 表）：受控枚举，(domain 键, 展示名) 有序元组 ——
+# 域键即 prompts/scenarios/<domain>.md 文件名与 Task.scenario_domain 取值；此处集中维护，
+# models 校验 / scenario api / runtime 注入 / seed 共用同一来源，避免四处硬编码漂移。
+# 顺序固定 = 列表接口/前端分类的展示序（对齐 §8 表自上而下）。
+SCENARIO_DOMAINS = (
+    ("monitor-inspection", "监控巡检"),
+    ("log-triage", "日志隐患"),
+    ("db-performance", "数据库性能排查"),
+    ("middleware-setup", "中间件安装配置"),
+    ("alert", "告警"),
+    ("fault-diagnosis", "故障诊断"),
+    ("change-risk", "变更风险"),
+    ("capacity-forecast", "容量预测"),
+    ("cmdb-governance", "CMDB 数据治理"),
+    ("kb-qa", "知识库问答"),
+    ("runbook-generation", "应急预案生成"),
+    ("ops-scripting", "运维脚本编写"),
+)
+SCENARIO_KEYS = {key for key, _label in SCENARIO_DOMAINS}
 
 
 class TimestampMixin:
@@ -647,4 +666,46 @@ class AuditLog(db.Model):
             "result": self.result,
             "detail": self.detail,
             "created_at": self.created_at,
+        }
+
+
+# ============================================================
+# P9 十二运维场景域（scenario-templates，0007 建表）
+# ============================================================
+
+
+class ScenarioTemplate(TimestampMixin, db.Model):
+    """十二运维场景域模板（P9，design D1/D3）：每域一条，域提示词 + 任务引导 + 预设装配。
+
+    system_prompt 以 backend/prompts/scenarios/<domain>.md 为唯一来源（seed 幂等装载，
+    默认不覆盖人工改动，见 scenario design D1）；preset_* 存四类能力实体 id 数组——
+    注册中心实体是动态 CRUD，引用允许随时间漂移，apply 时交现存+可用实体集合并跳过失效项
+    （design D3）。列用 db.JSON（SQL 层 TEXT，沿用 args/composed_of 先例），可空 = 无装配。
+    """
+
+    __tablename__ = "scenario_templates"
+
+    id = db.Column(db.Integer, primary_key=True)
+    domain = db.Column(db.String(64), nullable=False, unique=True)
+    name = db.Column(db.String(64), nullable=False)  # 中文展示名（§8 表 label）
+    system_prompt = db.Column(db.Text, nullable=False)  # 领域系统提示（唯一来源 .md）
+    task_template = db.Column(db.Text)  # 任务引导/建任务预填文本；可空
+    preset_skills = db.Column(db.JSON, nullable=False, default=list)
+    preset_mcp = db.Column(db.JSON, nullable=False, default=list)
+    preset_kb = db.Column(db.JSON, nullable=False, default=list)
+    preset_expert = db.Column(db.JSON, nullable=False, default=list)
+
+    def to_dict(self) -> dict:
+        return {
+            "id": self.id,
+            "domain": self.domain,
+            "name": self.name,
+            "system_prompt": self.system_prompt,
+            "task_template": self.task_template,
+            "preset_skills": self.preset_skills or [],
+            "preset_mcp": self.preset_mcp or [],
+            "preset_kb": self.preset_kb or [],
+            "preset_expert": self.preset_expert or [],
+            "created_at": self.created_at,
+            "updated_at": self.updated_at,
         }

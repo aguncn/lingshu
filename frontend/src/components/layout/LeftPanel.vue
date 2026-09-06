@@ -7,7 +7,7 @@ import {
 import { onMounted } from 'vue'
 
 import { useModelStore } from '../../stores/model'
-import { usePromptStore } from '../../stores/prompt'
+import { useScenarioStore } from '../../stores/scenario'
 import { useSpaceStore } from '../../stores/space'
 import { useTaskStore } from '../../stores/task'
 import { useUiStore } from '../../stores/ui'
@@ -74,11 +74,11 @@ function totalTaskCount() {
   return space.spaces.reduce((sum, s) => sum + taskCountOf(s.id), 0)
 }
 
-// 冷启动装载：空间确定后拉全部空间任务；模板条/供应商并行加载
+// 冷启动装载：空间确定后拉全部空间任务；场景域清单/供应商并行加载（各自失败互不拖累）
 onMounted(async () => {
   await space.ensureLoaded()
   task.loadAll()
-  usePromptStore().fetchPresets()
+  useScenarioStore().ensureLoaded()
   useModelStore().fetchProviders()
 })
 </script>
@@ -92,7 +92,7 @@ onMounted(async () => {
         <div class="lp-sub">IT 运维智能体 · 工作台</div>
       </div>
 
-      <el-button class="lp-new-task" type="primary" :icon="Plus" @click="ui.taskDialogOpen = true">
+      <el-button class="lp-new-task" type="primary" :icon="Plus" @click="ui.openCreateTask()">
         新建任务
       </el-button>
 
