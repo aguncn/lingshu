@@ -1,0 +1,40 @@
+{
+  "note": "observe-lab → 灵枢「MCP 连接器」模板。两份都是给你贴/让 import_via_api.py 用的；推荐只开 openobserve-http（http 原生 O2 MCP）。name 全局唯一，重复会 400（脚本视作已存在跳过）。enabled 与 trust 都要 true 运行时才挂得上。敏感值用 <…> 占位：手动建按 docs/04 填；脚本会用 OO_* 环境变量现算替换。",
+  "connectors": [
+    {
+      "id": "openobserve-http",
+      "enabled": true,
+      "payload": {
+        "name": "openobserve-ec",
+        "transport": "http",
+        "url": "http://localhost:5080/api/default/mcp",
+        "headers": {
+          "Authorization": "Basic <OO_BASIC>"
+        },
+        "trust": true,
+        "enabled": true
+      },
+      "note": "首选。url 里的 default 换成你的 O2 org。<OO_BASIC> = base64(OO_EMAIL:OO_PASSWORD)，docs/04 有命令生成，导入脚本自动算。测试应为 ok + 工具列表。"
+    },
+    {
+      "id": "openobserve-stdio",
+      "enabled": false,
+      "payload": {
+        "name": "openobserve-community",
+        "transport": "stdio",
+        "command": "uvx",
+        "args": ["--from", "openobserve-community-mcp", "openobserve-mcp"],
+        "env": {
+          "OO_BASE_URL": "<OO_BASE_URL>",
+          "OO_ORG": "<OO_ORG>",
+          "OO_AUTH_MODE": "basic",
+          "OO_USERNAME": "<OO_EMAIL>",
+          "OO_PASSWORD": "<OO_PASSWORD>"
+        },
+        "trust": true,
+        "enabled": true
+      },
+      "note": "兜底：老版本 O2 无原生 MCP 时用。需机器能跑 uvx(Windows 为 uvx.exe 且在 PATH)。env 整体 Fernet 加密入库。默认关，想用再把 enabled 改 true 并重跑导入。"
+    }
+  ]
+}

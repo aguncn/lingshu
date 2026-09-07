@@ -1,0 +1,40 @@
+{
+  "name": "ec_F1_订单库连接池耗尽或慢SQL",
+  "description": "F1: 订单库连接池耗尽/慢SQL。窗口内命中特征日志数≥阈值触发。",
+  "stream_type": "logs",
+  "stream_name": "ec_application_logs",
+  "severity": "P1",
+  "o2_export_guess": {
+    "name": "ec_F1_订单库连接池耗尽或慢SQL",
+    "stream_type": "logs",
+    "stream_name": "ec_application_logs",
+    "is_real_time": true,
+    "query_condition": {
+      "type": "sql",
+      "sql_mode": "full",
+      "sql": "select count(*) as count from \"ec_application_logs\" where service in ('ec-order','ec-payment') and level='ERROR' and (message like '%pool exhausted%' or message like '%ER_LOCK_WAIT_TIMEOUT%' or message like '%query too slow%' or message like '%full table scan%')"
+    },
+    "trigger_condition": {
+      "operator": ">=",
+      "threshold": 5,
+      "period": 15,
+      "frequency": 5,
+      "frequency_type": "minutes",
+      "cron": null
+    },
+    "description": "F1: 订单库连接池耗尽/慢SQL。窗口内命中特征日志数≥阈值触发。",
+    "destinations": [],
+    "template": "ec_F1_订单库连接池耗尽或慢SQL"
+  },
+  "sql_filter": "service in ('ec-order','ec-payment') and level='ERROR' and (message like '%pool exhausted%' or message like '%ER_LOCK_WAIT_TIMEOUT%' or message like '%query too slow%' or message like '%full table scan%')",
+  "ui": {
+    "数据源": "logs·ec_application_logs",
+    "统计": "count(*)",
+    "窗口分钟": 15,
+    "触发": "count >= 5",
+    "评估每分钟": 5,
+    "静默分钟": 0
+  },
+  "suggest_check": "看 ec_http_p99_ms/ec_db_conn_pool_*；搜 ec_application_logs 上述关键字",
+  "how_to_create": "本版本无公开告警规则 REST。请在 O2 告警页手工建：Alerts → New Rule → 按 ui 字段填（数据流/统计/窗口/触发/评估）。或让灵枢 SRE 专家经 MCP CreateAlert 工具创建。"
+}

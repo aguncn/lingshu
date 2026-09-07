@@ -1,0 +1,40 @@
+{
+  "name": "ec_F5_节点磁盘90%+证书过期",
+  "description": "F5: 节点磁盘过高/备份失败/外呼证书。",
+  "stream_type": "logs",
+  "stream_name": "ec_system_logs",
+  "severity": "P2",
+  "o2_export_guess": {
+    "name": "ec_F5_节点磁盘90%+证书过期",
+    "stream_type": "logs",
+    "stream_name": "ec_system_logs",
+    "is_real_time": true,
+    "query_condition": {
+      "type": "sql",
+      "sql_mode": "full",
+      "sql": "select count(*) as count from \"ec_system_logs\" where (message like '%disk%' or message like '%No space left%' or message like '%certificate%') and level in ('WARN','ERROR')"
+    },
+    "trigger_condition": {
+      "operator": ">=",
+      "threshold": 5,
+      "period": 15,
+      "frequency": 5,
+      "frequency_type": "minutes",
+      "cron": null
+    },
+    "description": "F5: 节点磁盘过高/备份失败/外呼证书。",
+    "destinations": [],
+    "template": "ec_F5_节点磁盘90%+证书过期"
+  },
+  "sql_filter": "(message like '%disk%' or message like '%No space left%' or message like '%certificate%') and level in ('WARN','ERROR')",
+  "ui": {
+    "数据源": "logs·ec_system_logs",
+    "统计": "count(*)",
+    "窗口分钟": 15,
+    "触发": "count >= 5",
+    "评估每分钟": 5,
+    "静默分钟": 0
+  },
+  "suggest_check": "看 ec_node_disk_pct{node='ec-node-2'}；df/证书续期审计",
+  "how_to_create": "本版本无公开告警规则 REST。请在 O2 告警页手工建：Alerts → New Rule → 按 ui 字段填（数据流/统计/窗口/触发/评估）。或让灵枢 SRE 专家经 MCP CreateAlert 工具创建。"
+}

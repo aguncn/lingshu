@@ -1,0 +1,17 @@
+# observe-lab：为灵枢搭建的「OpenObserve 电商可观测模拟实验台」数据生成器
+# 独立 uv 项目（不并入灵枢 backend/frontend 的包），依赖仅纯 wheel（Windows 友好）。
+[project]
+name = "observe-lab"
+version = "0.1.0"
+description = "OpenObserve 电商在线交易模拟数据 + 故障剧本 + 灵枢接入实验台"
+requires-python = ">=3.10"
+dependencies = [
+    "requests>=2.31",
+    "protobuf>=4.25",
+    "opentelemetry-proto>=1.28",
+]
+
+# 常用命令速记（README/文档里有更细的）
+#   uv sync                      # 安装依赖（生成 .venv）
+#   uv run python selftest.py    # 探活 O2（先填 .env）
+#   uv run python -m sim.main --backfill-days 3 --incident live

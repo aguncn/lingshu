@@ -1,0 +1,10 @@
+# observe-lab 本地/运行产物（凭据、缓存、构建物一律不入库）
+.env
+.cache/
+.venv/
+__pycache__/
+*.pyc
+dist/
+build/
+main.log
+.ds_store
