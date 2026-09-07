@@ -32,7 +32,7 @@ const commands = [
     },
   },
   { id: 'open-settings', label: '打开设置', keywords: 'settings setting 设置 偏好 配置', run: () => { ui.settingsOpen = true } },
-  { id: 'open-registry', label: '打开注册中心', keywords: 'registry 注册 中心 能力 技能 mcp', run: () => { ui.openRegistry('skills') } },
+  { id: 'open-plaza', label: '打开能力广场', keywords: 'plaza 广场 能力 技能 资料库 mcp 知识库', run: () => { ui.openPlaza('skills') } },
   {
     id: 'refresh-tasks',
     label: '刷新任务列表',

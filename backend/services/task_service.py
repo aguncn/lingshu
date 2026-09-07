@@ -3,7 +3,14 @@
 from sqlalchemy import desc, select
 
 from ..extensions import db
-from ..models import TASK_STATUSES, TASK_TYPES, VISIBILITIES, Space, Task
+from ..models import (
+    TASK_PERMISSION_MODES,
+    TASK_STATUSES,
+    TASK_TYPES,
+    VISIBILITIES,
+    Space,
+    Task,
+)
 from . import file_store
 from .errors import NotFoundError, ValidationError
 from .space_service import get_space_or_raise
@@ -45,13 +52,17 @@ def create_task(
     task_type: str | None,
     visibility: str | None = None,
     model_config_id=None,
+    permission_mode: str | None = None,
 ) -> dict:
     get_space_or_raise(space_id)
     cleaned_title = (title or "").strip()
     if not cleaned_title:
         raise ValidationError("title 不能为空")
-    typ = _clean(task_type, TASK_TYPES, "task_type", None)
+    # C5：task_type 已从新建入口移除，请求体不再携带 → 缺省回落 'general'（列保留、徽标仍展示）
+    typ = _clean(task_type, TASK_TYPES, "task_type", "general")
     vis = _clean(visibility, VISIBILITIES, "visibility", "private")
+    # 权限模式缺省 strict（=现状最严）；白名单校验与其它枚举一致
+    perm = _clean(permission_mode, TASK_PERMISSION_MODES, "permission_mode", "strict")
 
     task = Task(
         space_id=space_id,
@@ -59,6 +70,7 @@ def create_task(
         task_type=typ,
         visibility=vis,
         model_config_id=_clean_optional_int(model_config_id, "model_config_id"),
+        permission_mode=perm,
     )
     db.session.add(task)
     db.session.commit()
@@ -91,11 +103,11 @@ def update_task(task_id: int, **fields) -> dict:
         updates["status"] = _clean(fields["status"], TASK_STATUSES, "status", None)
     if "visibility" in fields:
         updates["visibility"] = _clean(fields["visibility"], VISIBILITIES, "visibility", None)
-    if "scenario_domain" in fields:
-        value = fields["scenario_domain"]
-        updates["scenario_domain"] = (value or "").strip() or None
     if "model_config_id" in fields:
         updates["model_config_id"] = _clean_optional_int(fields["model_config_id"], "model_config_id")
+    if "permission_mode" in fields:
+        # 运行中改档只影响之后装配的运行，不打断已在跑的会话（每次 chat 重新 build）
+        updates["permission_mode"] = _clean(fields["permission_mode"], TASK_PERMISSION_MODES, "permission_mode", None)
 
     if not updates:
         raise ValidationError("没有可更新的字段")

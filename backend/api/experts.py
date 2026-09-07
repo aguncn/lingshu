@@ -2,7 +2,7 @@
 # 形态与 model_prompt 域一致：POST→201、DELETE→{"ok":true}、AppError 收敛。
 from flask import Blueprint, request
 
-from ..services import registry_expert
+from ..services import expert_profile, registry_expert
 from ..services.errors import AppError
 
 experts_bp = Blueprint("experts", __name__, url_prefix="/api")
@@ -30,6 +30,12 @@ def create_expert():
         description=body.get("description"),
         system_prompt=body.get("system_prompt"),
         role=body.get("role"),
+        preset_skills=body.get("preset_skills"),
+        preset_mcp=body.get("preset_mcp"),
+        preset_kb=body.get("preset_kb"),
+        preset_library=body.get("preset_library"),
+        default_provider_id=body.get("default_provider_id"),
+        default_model_name=body.get("default_model_name"),
         composed_of=body.get("composed_of"),
         enabled=body.get("enabled"),
     ), 201
@@ -44,7 +50,10 @@ def get_expert(eid: int):
 def update_expert(eid: int):
     body = _body()
     keys = (
-        "name", "description", "system_prompt", "role", "composed_of", "enabled",
+        "name", "description", "system_prompt", "role",
+        "preset_skills", "preset_mcp", "preset_kb", "preset_library",
+        "default_provider_id", "default_model_name",
+        "composed_of", "enabled",
     )
     fields = {k: body.get(k) for k in keys if k in body}
     return registry_expert.update_expert(eid, **fields)
@@ -54,3 +63,10 @@ def update_expert(eid: int):
 def delete_expert(eid: int):
     registry_expert.delete_expert(eid)
     return {"ok": True}
+
+
+@experts_bp.post("/tasks/<int:task_id>/expert/apply")
+def apply_expert(task_id: int):
+    """把一份运维专家档案快照装配到任务（人设/预设/资料/默认模型 → 任务自身挂载/绑定）。"""
+    body = _body()
+    return expert_profile.apply_expert_profile(task_id, body.get("expert_id"))

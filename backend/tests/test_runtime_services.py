@@ -393,7 +393,9 @@ def _schema_names(toolkit) -> set:
     return {s["function"]["name"] for s in schemas}
 
 
-def test_build_composes_system_prompt_with_skill_and_expert(client):
+def test_build_skill_becomes_readonly_tool_expert_in_prompt(client):
+    """skill-kb-callable：技能不再注入系统提示——可用技能=skill_<slug> 只读工具（可离线列出），
+    专家人设照旧参与角色塑造；desc 出 skill_tools 装配快照。"""
     from backend.services import agent_runtime
 
     sid = _make_skill(client, name="alarm", skill_md="先核对告警时间窗，再按 SOP 处理。")
@@ -403,13 +405,15 @@ def test_build_composes_system_prompt_with_skill_and_expert(client):
 
     agent, desc = agent_runtime.build(tid)
     assert desc["skills"] == ["alarm"]
+    assert desc["skill_tools"] == [{"name": "skill_alarm", "skill_name": "alarm"}]
     assert desc["experts"] == ["dba"]
     assert desc["model"]["model"] == "deepseek-chat"
     prompt = agent._system_prompt
-    # 注入的技能指令与专家人设都出现；任务上下文也进提示
-    assert "先核对告警时间窗" in prompt and "你是资深数据库专家" in prompt
-    assert "alarm" in prompt
-    assert "标题" in prompt
+    names = _schema_names(agent.toolkit)
+    # 技能指令只经工具按需取用：不进系统提示、但出现在可用工具集（工具即「已装配」）
+    assert "你是资深数据库专家" in prompt and "标题" in prompt
+    assert "skill_alarm" in names
+    assert "先核对告警时间窗" not in prompt and "alarm" not in prompt
 
 
 def test_build_skips_disabled_skill_and_expert(client):
@@ -424,6 +428,9 @@ def test_build_skips_disabled_skill_and_expert(client):
 
     agent, desc = agent_runtime.build(tid)
     assert desc["skills"] == [] and desc["experts"] == []
+    assert desc["skill_tools"] == []
+    names = _schema_names(agent.toolkit)
+    assert "skill_off_skill" not in names  # 停用技能不出现为工具
     prompt = agent._system_prompt
     assert "不该出现的指令" not in prompt and "不该出现的人设" not in prompt
 
@@ -513,6 +520,125 @@ def test_build_agent_confirm_default_mode(client):
     tid = _built_and_model(client)
     agent, _ = agent_runtime.build(tid)
     assert agent.state.permission_context.mode == PermissionMode.DEFAULT
+
+
+def _built_with_mode(client, mode: str) -> int:
+    """建「已绑可用模型 + 指定权限档」的任务并返回 task_id（权限装配单测，每例独立建任务隔离）。"""
+    pid = _make_provider(client, name=f"deepseek-{mode}", api_key="sk-stored")
+    sid = _make_space(client)
+    tid = client.post(
+        f"/api/spaces/{sid}/tasks",
+        json={"title": "t", "task_type": "fault", "permission_mode": mode},
+    ).get_json()["id"]
+    _bind_config(client, tid, pid, model_name="deepseek-chat")
+    return tid
+
+
+def test_build_permission_modes_map_to_agentscope(client):
+    """任务三种权限档 → 装配出对应 PermissionContext 与描述：strict=DEFAULT（最严，与旧行为逐字一致）、
+    trusted=BYPASS 且零规则（全程无人工确认）、limited=BYPASS+仅危险规则 ask（写/删类要确认）。"""
+    from agentscope.permission import PermissionBehavior, PermissionMode
+    from backend.services import agent_runtime
+
+    # strict：装配快照显式落档；上下文最严
+    agent, desc = agent_runtime.build(_built_with_mode(client, "strict"))
+    assert desc["permission_mode"] == "strict"
+    ctx = agent.state.permission_context
+    assert ctx.mode == PermissionMode.DEFAULT
+
+    # trusted：BYPASS，无任何规则 → 全程不问
+    agent, desc = agent_runtime.build(_built_with_mode(client, "trusted"))
+    assert desc["permission_mode"] == "trusted"
+    ctx = agent.state.permission_context
+    assert ctx.mode == PermissionMode.BYPASS
+    assert not ctx.ask_rules and not ctx.deny_rules and not ctx.allow_rules
+
+    # limited：BYPASS + 少量 ask（文件修改全量 + 命令删除/覆盖子串）
+    agent, desc = agent_runtime.build(_built_with_mode(client, "limited"))
+    ctx = agent.state.permission_context
+    assert desc["permission_mode"] == "limited"
+    assert ctx.mode == PermissionMode.BYPASS
+    ask = {tool: [r.rule_content for r in rules] for tool, rules in ctx.ask_rules.items()}
+    assert "" in ask.get("Write", []) and "" in ask.get("Edit", [])  # 空内容=匹配一切（文件修改都确认）
+    assert any(r and "rm" in r for r in ask.get("Bash", []))  # 删除类命令子串规则已注册
+    assert "Read" not in ask and "Glob" not in ask and "Grep" not in ask  # 只读工具不打扰
+    assert all(
+        r.behavior == PermissionBehavior.ASK
+        for rules in ctx.ask_rules.values() for r in rules
+    )
+
+    # 非法档被 API/service 白名单拒绝（create 即 400）
+    bad = client.post(
+        f"/api/spaces/{_make_space(client)}/tasks",
+        json={"title": "t", "task_type": "fault", "permission_mode": "nope"},
+    )
+    assert bad.status_code == 400
+
+
+def test_limited_engine_read_and_general_auto_allow_only_dangerous_ask(client):
+    """limited 语义（真实装配的 PermissionContext 跑 PermissionEngine，不真执行）：
+    只读/一般命令自动放行；文件写入与删除类命令需确认。"""
+    import asyncio
+
+    from agentscope.permission import PermissionBehavior, PermissionEngine
+    from agentscope.tool import Bash, Read, Write
+    from backend.services import agent_runtime
+
+    agent, _ = agent_runtime.build(_built_with_mode(client, "limited"))
+    engine = PermissionEngine(agent.state.permission_context)
+    bash, rd, wr = Bash(), Read(), Write()
+
+    async def run():
+        assert (await engine.check_permission(bash, {"command": "ls -la"})).behavior == PermissionBehavior.ALLOW
+        # 一般命令（内联改写不属于删除子串）自动放行——启发式边界：漏判则少问一次（安全权衡记录于代码注释）
+        assert (await engine.check_permission(bash, {"command": "echo hi > /tmp/x.txt"})).behavior == PermissionBehavior.ALLOW
+        assert (await engine.check_permission(bash, {"command": "rm -rf /tmp/x"})).behavior == PermissionBehavior.ASK
+        assert (await engine.check_permission(rd, {"path": "/x/a.txt"})).behavior == PermissionBehavior.ALLOW
+        assert (await engine.check_permission(wr, {"file_path": "/x/o.txt", "content": "hi"})).behavior == PermissionBehavior.ASK
+
+    asyncio.run(run())
+
+
+def test_askable_power_shell_rule_matches_case_insensitive(client):
+    """AskablePowerShell.match_rule：命令内容的删除/覆盖子串大小写不敏感命中；空内容命中一切。"""
+    import asyncio
+
+    from backend.services import agent_runtime
+
+    ps = agent_runtime._askable_powershell_cls()()  # noqa: SLF001 —— 单测触及内部装配细节
+    async def run():
+        assert await ps.match_rule("remove-item", {"command": "Remove-Item C:/x -Recurse -Force"}) is True
+        assert await ps.match_rule("Move-Item", {"command": "move-item a.txt b.txt"}) is True  # 规则与命令任意大小写
+        assert await ps.match_rule("remove-item", {"command": "Get-ChildItem"}) is False  # 不相关命令不命中
+        assert await ps.match_rule("", {"command": "Get-Process"}) is True  # 空规则内容 = 工具级命中一切
+
+    asyncio.run(run())
+
+
+def test_limited_engine_power_shell_general_allowed_deletion_ask(client):
+    """Windows：limited 档经 engine 校验 PowerShell 一般命令 ALLOW、删除/覆盖命令 ASK
+    （PowerShell 原生每次返回 ASK 的实现不影响 BYPASS 下的自动放行，靠 ask 子串规则兜底危险命令）。"""
+    import asyncio
+    import sys
+
+    import pytest
+
+    from agentscope.permission import PermissionBehavior, PermissionEngine
+    from backend.services import agent_runtime
+
+    if not sys.platform.startswith("win"):
+        pytest.skip("PowerShell 仅内置在 Windows 装配")
+
+    agent, _ = agent_runtime.build(_built_with_mode(client, "limited"))
+    engine = PermissionEngine(agent.state.permission_context)
+    ps = agent_runtime._askable_powershell_cls()()  # noqa: SLF001 —— 与 _builtin_tools 挂载的同类同实现
+
+    async def run():
+        assert (await engine.check_permission(ps, {"command": "Get-Process"})).behavior == PermissionBehavior.ALLOW
+        assert (await engine.check_permission(ps, {"command": "Remove-Item C:/x -Force"})).behavior == PermissionBehavior.ASK
+        assert (await engine.check_permission(ps, {"command": "Move-Item a.txt b.txt"})).behavior == PermissionBehavior.ASK
+
+    asyncio.run(run())
 
 
 def test_build_task_without_model_readable_error(client):
@@ -972,22 +1098,214 @@ def test_chat_confirm_deny_no_side_effect(app, client, monkeypatch, tmp_path):
     assert any((a.result, a.target) == ("deny", confirm_id) for a in denies)
 
 
-def test_chat_concurrent_409_then_restart_after_consumed(app, client, monkeypatch):
-    """并发互斥：运行中再次 chat → 409 JSON（原会话不受影响）；消费/结束后可再次发起（7.2 场景）。"""
+def test_chat_concurrent_409_then_restart_after_consumed(app, client, monkeypatch, tmp_path):
+    """并发互斥（保活语义以「run 真在跑」为界）：停驻中的活动会话再次 chat → 409 JSON（原会话不受影响）；
+    回执放行、run 结束后可再次发起（7.2 场景）。快脚本瞬间结束即释放槽位——这正是消除「永久 409」的关键。"""
     tid = _make_task(client)
-    _stub_resolve(monkeypatch, lambda: [_plain_text("第一轮回复。")])
+    target = tmp_path / "conc.txt"
 
-    # 第一次 chat：buffered=False 保持流打开 → 会话处于活动（未消费即仍注册）
+    def script():
+        def first(messages, tools):
+            return _plain_text("第一轮，请求确认。") + [
+                _tcb("Write", {"file_path": str(target), "content": "x"})
+            ]
+
+        def second(messages, tools):
+            return _plain_text("第一轮完成。")
+
+        return [first, second]
+
+    _stub_resolve(monkeypatch, script)
+
+    # 第一次 chat：读到 confirm_request 即停读 —— run 停驻在活动会话上（未回执仍注册）
     resp1 = client.post(f"/api/tasks/{tid}/chat", json={"message": "第一轮"}, buffered=False)
     assert resp1.status_code == 200
-    # 运行中再次发起 → 409
+    run_id = confirm_id = None
+    for evt in _stream_frames(resp1):
+        if evt["type"] == "confirm_request":
+            run_id, confirm_id = evt["run_id"], evt["confirm_id"]
+            break
+    assert confirm_id is not None
+    # run 停驻 → 会话仍活动 → 再次 chat → 409（原会话不受影响）
     dup = client.post(f"/api/tasks/{tid}/chat", json={"message": "第二轮"})
     assert dup.status_code == 409 and "运行" in dup.get_json()["message"]
-    # 原会话不受影响：消费首轮流，正常 done
-    evts1 = _parse_sse(resp1.get_data(as_text=True))
-    assert evts1[-1]["type"] == "done"
-    # 结束后任务可再次发起（每次 resolve 生成新打桩模型）
-    resp3 = client.post(f"/api/tasks/{tid}/chat", json={"message": "第三轮"})
+    # 回执放行 → 第一轮流自然收尾（done）
+    dr = client.post(f"/api/tasks/{tid}/chat/decision",
+                     json={"run_id": run_id, "confirm_id": confirm_id, "allow": True})
+    assert dr.status_code == 200
+    tail = list(_stream_frames(resp1))
+    assert tail[-1]["type"] == "done"
+    assert target.exists()  # 放行 → 真执行
+    # run 结束后任务可再次发起（每次 resolve 生成新打桩模型）；新脚本同样 park，验「可发起」即停
+    resp3 = client.post(f"/api/tasks/{tid}/chat", json={"message": "第三轮"}, buffered=False)
     assert resp3.status_code == 200
-    evts3 = _parse_sse(resp3.get_data(as_text=True))
-    assert evts3[-1]["type"] == "done"
+    assert client.post(f"/api/tasks/{tid}/chat/stop").get_json()["ok"] is True
+    for _e in _stream_frames(resp3):
+        pass
+
+
+# ============================================================
+# 保活/确认可恢复/回收（session-keepalive，task 6）：SSE 断开≠取消
+# ============================================================
+
+def test_session_detach_keeps_run_parked_and_decision_recovers(app, client, tmp_path):
+    """保活核心（回归最初卡死场景）：消费端读到 confirm 后「脱离」（不再迭代 events）≠ 取消 run——
+    worker 仍驻留待确认；经 status/decision 恢复后跑至 done，worker 自注销、槽位随之释放。"""
+    import json as _json
+    import time as _time
+
+    from backend.services import agent_session, message as msg_svc
+
+    tid = _make_session_ready(app, client)
+    target = tmp_path / "recover.txt"
+
+    def script():
+        def first(messages, tools):
+            return _plain_text("写入前确认。") + [
+                _tcb("Write", {"file_path": str(target), "content": "recovered"})
+            ]
+
+        def second(messages, tools):
+            return _plain_text("写入完成。")
+
+        return [first, second]
+
+    sess = agent_session.ChatSession.create(app, tid, "写文件")
+    sess.agent.model = _DriverFakeModel(script())
+    msg_svc.add_user_message(tid, "写文件", run_id=sess.run_id)
+    assert agent_session.register(tid, sess) is True  # 镜像 chat 端点的注册前置步骤
+    sess.start()
+
+    # 第一段：读到 confirm_request 即 close 生成器 —— 模拟前端切走、SSE 连接断开（消费端脱离）
+    gen = sess.events()
+    confirm = None
+    for frame in gen:
+        data = _json.loads(frame[6:-2])
+        if data["type"] == "confirm_request":
+            confirm = data
+            break
+    gen.close()
+    assert confirm is not None
+    # 脱离 ≠ 取消：run 仍注册、停驻待确认（这是旧实现会 cancel 掉、从而永久 409 的关键差异）
+    assert not sess._cancelled.is_set()
+    assert agent_session.active_session(tid) is sess
+    assert sess.is_parked()
+    # 「用户回来」经 status 采纳（摘要一致）+ decision 回执恢复
+    info = sess.current_confirm()
+    assert info["confirm_id"] == confirm["confirm_id"] and info["name"] == "Write" and info["reason"]
+    sess.touch()
+    assert sess.submit_decision(confirm["confirm_id"], allow=True) is True
+
+    # 重新接入读余流：worker 续跑至 done，放行的写文件真发生
+    tail = []
+    for frame in sess.events():
+        data = _json.loads(frame[6:-2])
+        tail.append(data)
+        if data["type"] == "done":
+            break
+    assert tail[-1]["type"] == "done"
+    assert target.exists() and target.read_text() == "recovered"
+    # worker 自注销（无任何端点在 generate 里 unregister 的情况下）：任务槽位空闲
+    deadline = _time.monotonic() + 3.0
+    while agent_session.active_session(tid) is not None and _time.monotonic() < deadline:
+        _time.sleep(0.02)
+    assert agent_session.active_session(tid) is None
+
+
+def test_chat_status_and_stop_release_parked_slot(app, client, monkeypatch, tmp_path):
+    """保活端点：运行中 /chat/status 暴露 active/run_id/waiting/confirm 摘要；
+    /chat/stop 真取消（区别于 SSE 脱离）→ 槽位释放、无副作用、可立即再发起。"""
+    tid = _make_task(client)
+    target = tmp_path / "stopme.txt"
+
+    def script():
+        def first(messages, tools):
+            return _plain_text("请求确认。") + [
+                _tcb("Write", {"file_path": str(target), "content": "x"})
+            ]
+
+        def second(messages, tools):
+            return _plain_text("继续。")
+
+        return [first, second]
+
+    _stub_resolve(monkeypatch, script)
+    resp = client.post(f"/api/tasks/{tid}/chat", json={"message": "写文件"}, buffered=False)
+    run_id = confirm_id = None
+    for evt in _stream_frames(resp):
+        if evt["type"] == "confirm_request":
+            run_id, confirm_id = evt["run_id"], evt["confirm_id"]
+            break
+
+    # 运行中状态：active/waiting + confirm 摘要（reason 与事件文案一致）
+    st = client.get(f"/api/tasks/{tid}/chat/status").get_json()
+    assert st["active"] is True and st["run_id"] == run_id and st["waiting"] is True
+    assert st["confirm"]["confirm_id"] == confirm_id and st["confirm"]["name"] == "Write"
+    assert st["confirm"]["reason"]
+
+    # stop：真取消 + 释放槽位；无副作用（未放行的 Write 不执行）
+    assert client.post(f"/api/tasks/{tid}/chat/stop").get_json()["ok"] is True
+    assert client.get(f"/api/tasks/{tid}/chat/status").get_json()["active"] is False
+    assert not target.exists()
+    # 已停止 → 再 stop 幂等 ok；任务不存在 → status/stop 均 404
+    assert client.post(f"/api/tasks/{tid}/chat/stop").get_json()["ok"] is True
+    assert client.post("/api/tasks/999999/chat/stop").status_code == 404
+    assert client.get("/api/tasks/999999/chat/status").status_code == 404
+    # 原 SSE 流随 stop 自然收尾（event loop 见 cancelled 退出）
+    for _evt in _stream_frames(resp):
+        pass
+
+    # 槽位已释放 → 可立即再发起（旧实现的永久 409 在此应成为可恢复）；脚本同样会 park，
+    # 这里仅验「能再次发起(200)」，随即显式 stop 并排空，避免遗留活动会话。
+    resp2 = client.post(f"/api/tasks/{tid}/chat", json={"message": "再来一轮"}, buffered=False)
+    assert resp2.status_code == 200
+    assert client.post(f"/api/tasks/{tid}/chat/stop").get_json()["ok"] is True
+    for _evt in _stream_frames(resp2):
+        pass
+
+
+def test_reaper_reclaims_orphan_parked_session(app, client, monkeypatch, tmp_path):
+    """孤儿回收（防永久 409 泄漏）：停驻待确认且消费端长期无 beat 的会话被 _reap_once 取消 →
+    worker 自注销 → 槽位释放，之后立即可被新会话占用。"""
+    import json as _json
+    import time as _time
+
+    from backend.services import agent_session
+
+    tid = _make_session_ready(app, client)
+    monkeypatch.setattr(agent_session, "_CONSUMER_TTL", 0.0)  # 任何「无近期 beat」的 park 都算孤儿
+    target = tmp_path / "orphan.txt"  # Write 会二次确认（Read 走只读快路径不 park）
+
+    def script():
+        def first(messages, tools):
+            return _plain_text("请求确认。") + [
+                _tcb("Write", {"file_path": str(target), "content": "x"})
+            ]
+
+        def second(messages, tools):
+            return _plain_text("写完了。")
+
+        return [first, second]
+
+    sess = agent_session.ChatSession.create(app, tid, "写文件")
+    sess.agent.model = _DriverFakeModel(script())
+    sess.start()
+    gen = sess.events()
+    confirm = None
+    for frame in gen:
+        data = _json.loads(frame[6:-2])
+        if data["type"] == "confirm_request":
+            confirm = data
+            break
+    gen.close()  # 模拟消费端脱离
+    assert confirm is not None and sess.is_parked()
+    sess._last_consumer_seen = 0.0  # 人为让 beat 过期 → 孤儿
+
+    agent_session._reap_once()  # 回收一次：cancel → worker 醒来自注销
+    deadline = _time.monotonic() + 3.0
+    while agent_session.active_session(tid) is not None and _time.monotonic() < deadline:
+        _time.sleep(0.02)
+    assert agent_session.active_session(tid) is None
+    # 槽位已释放：原「卡死对话」终点不再是永久 409，新会话可立即占用
+    assert agent_session.register(tid, sess) is True
+    agent_session.unregister(tid)

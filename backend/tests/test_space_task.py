@@ -94,6 +94,9 @@ def test_task_create_list_validation(client):
     assert client.post(f"/api/spaces/{sid}/tasks", json={"task_type": "fault"}).status_code == 400
     assert client.post(f"/api/spaces/{sid}/tasks", json={"title": "t", "task_type": "nope"}).status_code == 400
     assert client.post("/api/spaces/9999/tasks", json={"title": "t", "task_type": "fault"}).status_code == 404
+    # C5：新建入口不再携带 task_type → 服务端缺省回落 'general'（列保留，SpaceTree 徽标仍展示）
+    no_tt = client.post(f"/api/spaces/{sid}/tasks", json={"title": "无类型任务"}).get_json()
+    assert no_tt["task_type"] == "general"
 
 
 def test_task_get_rename_keeps_folder(app, client, tmp_path):

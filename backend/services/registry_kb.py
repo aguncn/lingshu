@@ -203,20 +203,8 @@ def upload_document(kb_id: int, filename, data: bytes) -> dict:
 # AD-03：关键词检索（默认检索；向量化 P1）
 # ============================================================
 
-def search_kb(kb_id: int, query=None, top_k=None) -> list[dict]:
-    """关键词命中计分 top-k：返回分数降序切块（content + 来源 filename + chunk_index + score）。"""
-    kb = _get_or_raise(kb_id)
-    if kb.status == "disabled":
-        raise ValidationError("知识库已停用，无法检索（请先将 status 改回 ready/draft）")
-
-    q = (query or "").strip()
-    if not q:
-        raise ValidationError("query 不能为空")
-    limit = min(
-        _positive_int(top_k, "top_k") if top_k is not None else 5,
-        _TOP_K_CAP,
-    )
-
+def _score_kb(kb: KnowledgeBase, q: str) -> list[dict]:
+    """对单个知识库全部切块做关键词计分（返回含来源 kb_name/kb_id 的降序命中）。"""
     # 分词：空白切出的词 + 整句各计一次（design D5：中文整句短语也能精确子串命中）
     tokens = list(dict.fromkeys(t for t in re.split(r"\s+", q) if t))
     rows = db.session.execute(
@@ -234,6 +222,7 @@ def search_kb(kb_id: int, query=None, top_k=None) -> list[dict]:
         meta = chunk.meta or {}
         hits.append({
             "kb_id": kb.id,
+            "kb_name": kb.name,
             "chunk_id": chunk.id,
             "content": content,
             "filename": meta.get("filename"),
@@ -241,4 +230,46 @@ def search_kb(kb_id: int, query=None, top_k=None) -> list[dict]:
             "score": score,
         })
     hits.sort(key=lambda r: (-r["score"], r["chunk_index"] or 0))
-    return hits[:limit]
+    return hits
+
+
+def _resolve_limit(top_k) -> int:
+    """top_k 收敛到 [1, _TOP_K_CAP]（单库/跨库共用同一口径）。"""
+    return min(
+        _positive_int(top_k, "top_k") if top_k is not None else 5,
+        _TOP_K_CAP,
+    )
+
+
+def search_kb(kb_id: int, query=None, top_k=None) -> list[dict]:
+    """关键词命中计分 top-k：返回分数降序切块（content + 来源 kb_name/filename + chunk_index + score）。"""
+    kb = _get_or_raise(kb_id)
+    if kb.status == "disabled":
+        raise ValidationError("知识库已停用，无法检索（请先将 status 改回 ready/draft）")
+
+    q = (query or "").strip()
+    if not q:
+        raise ValidationError("query 不能为空")
+    return _score_kb(kb, q)[:_resolve_limit(top_k)]
+
+
+def search_kbs(kb_ids, query=None, top_k=None) -> list[dict]:
+    """skill-kb-callable：跨库归并关键词检索（复用 _score_kb 单库计分，不引向量库）。
+
+    对每个给定库取计分 top（各库候补上界 = 返回上限，保证全局 top 不漏），再按
+    (-score, kb_id, chunk_index) 全局归并取 top-k。仅就绪（status='ready'）且存在的库参与；
+    停用/不存在库静默跳过（装配面已门控，此为双保险，检索工具永不因此报错）。
+    """
+    q = (query or "").strip()
+    if not q:
+        raise ValidationError("query 不能为空")
+    limit = _resolve_limit(top_k)
+
+    merged: list[dict] = []
+    for kb_id in kb_ids:
+        kb = db.session.get(KnowledgeBase, kb_id)
+        if kb is None or kb.status != "ready":
+            continue
+        merged.extend(_score_kb(kb, q)[:limit])
+    merged.sort(key=lambda r: (-r["score"], r["kb_id"], r["chunk_index"] or 0))
+    return merged[:limit]

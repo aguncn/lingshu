@@ -51,7 +51,6 @@ def create_app(config_object: type = Config) -> Flask:
     from .api.experts import experts_bp
     from .api.library import library_bp
     from .api.runtime import runtime_bp
-    from .api.scenario import scenario_bp
 
     app.register_blueprint(health_bp)
     app.register_blueprint(space_task_bp)
@@ -63,18 +62,17 @@ def create_app(config_object: type = Config) -> Flask:
     app.register_blueprint(experts_bp)
     app.register_blueprint(library_bp)
     app.register_blueprint(runtime_bp)
-    app.register_blueprint(scenario_bp)
 
     # 轻量迁移器：建/升 schema_version 元表并执行未应用的编号迁移
     from .migrate import run_migrations
 
     run_migrations(config_object.SQLITE_PATH)
 
-    # P9：建表后幂等装载十二场景域种子（seed 自证幂等/不覆盖既有行，需 app 上下文触达 db）
-    from .seed.scenarios import run_scenario_seed
+    # C5：建表/迁移后幂等装载运维专家档案种子（seed 自证幂等/不覆盖既有预设，需 app 上下文触达 db）
+    from .seed.profiles import run_profile_seed
 
     with app.app_context():
-        run_scenario_seed()
+        run_profile_seed()
 
     return app
 

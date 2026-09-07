@@ -17,6 +17,8 @@
   --ls-border: #dde3ec;
   --ls-fg: #1f2733;
   --ls-fg-dim: #7a8494;
+  /* 会话正文字号令牌（session-trace-ui）：默认档位较改动前 13.5px 收敛并缩小，明暗共用 */
+  --ls-font-size-msg: 11px;
 }
 
 html.dark {
@@ -49,6 +51,12 @@ body {
   -webkit-font-smoothing: antialiased;
 }
 
+/* 左栏拖拽调宽进行中（Workbench beginResize 时挂到 body）：整页十字线光标 + 禁选中，避免拖出栏外丢反馈 */
+body.ls-resizing {
+  cursor: col-resize;
+  user-select: none;
+}
+
 /* 细滚动条：贴合工业面板 */
 ::-webkit-scrollbar {
   width: 8px;
@@ -72,3 +80,19 @@ body {
   text-overflow: ellipsis;
   white-space: nowrap;
 }
+
+/* ── 能力广场：每类能力一套专属强调色（--cc 主色 / --cc-soft 卡底 / --cc-soft2 计数底）──
+   center 页根节点带 .rc-<kind> 类即注入；卡片样式在各 center 内以 var(--cc) 引用。
+   浅/深两态各自给足对比：亮底用 500 系，暗底换 300/400 系提亮。 */
+.rc-skills  { --cc: #8b5cf6; --cc-soft: rgba(139, 92, 246, .10); --cc-soft2: rgba(139, 92, 246, .18); }
+.rc-mcps    { --cc: #0891b2; --cc-soft: rgba(8, 145, 178, .10);  --cc-soft2: rgba(8, 145, 178, .18); }
+.rc-kbs     { --cc: #d97706; --cc-soft: rgba(217, 119, 6, .10);  --cc-soft2: rgba(217, 119, 6, .18); }
+.rc-experts { --cc: #e11d48; --cc-soft: rgba(225, 29, 72, .09);  --cc-soft2: rgba(225, 29, 72, .17); }
+.rc-library { --cc: #059669; --cc-soft: rgba(5, 150, 105, .10);  --cc-soft2: rgba(5, 150, 105, .18); }
+
+html.dark .rc-skills  { --cc: #a78bfa; --cc-soft: rgba(167, 139, 250, .14); --cc-soft2: rgba(167, 139, 250, .24); }
+html.dark .rc-mcps    { --cc: #22d3ee; --cc-soft: rgba(34, 211, 238, .12);  --cc-soft2: rgba(34, 211, 238, .22); }
+html.dark .rc-kbs     { --cc: #fbbf24; --cc-soft: rgba(251, 191, 36, .12);  --cc-soft2: rgba(251, 191, 36, .22); }
+html.dark .rc-experts { --cc: #fb7185; --cc-soft: rgba(251, 113, 133, .13); --cc-soft2: rgba(251, 113, 133, .23); }
+html.dark .rc-library { --cc: #34d399; --cc-soft: rgba(52, 211, 153, .12);  --cc-soft2: rgba(52, 211, 153, .22); }
+

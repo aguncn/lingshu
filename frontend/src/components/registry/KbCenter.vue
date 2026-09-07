@@ -76,7 +76,7 @@ async function submit() {
     }
     if (editingId.value === null) await createKb(payload)
     else await updateKb(editingId.value, payload)
-    ElMessage.success(editingId.value === null ? '知识库已创建' : '知识库已更新')
+    ElMessage.success(editingId.value === null ? 'RAG 库已创建' : 'RAG 库已更新')
     dialogOpen.value = false
     await reg.loadCategory('kbs')
   } catch { /* 拦截器已提示 */ } finally {
@@ -139,32 +139,32 @@ async function toggleStatus(kb) {
 async function onDelete(kb) {
   try {
     await ElMessageBox.confirm(
-      `删除知识库「${kb.name}」会连同其全部切块与任务挂载一并清理。确定删除？`,
-      '删除知识库',
+      `删除 RAG「${kb.name}」会连同其全部切块与任务挂载一并清理。确定删除？`,
+      '删除 RAG',
       { type: 'warning', confirmButtonText: '删除', cancelButtonText: '取消' },
     )
   } catch { return }
   try {
     await removeKb(kb.id)
-    ElMessage.success('知识库已删除')
+    ElMessage.success('RAG 已删除')
     await reg.loadCategory('kbs')
   } catch { /* 拦截器已提示 */ }
 }
 </script>
 
 <template>
-  <div class="rc">
+  <div class="rc rc-kbs">
     <div class="rc-head">
-      <span class="rc-title">知识库</span>
+      <span class="rc-title">RAG</span>
       <span v-if="list.length" class="rc-count">{{ list.length }}</span>
       <el-button class="rc-add" size="small" type="primary" :icon="Plus" @click="openNew">
-        新建知识库
+        新建 RAG
       </el-button>
     </div>
 
     <div v-loading="reg.loading" class="rc-body">
-      <el-empty v-if="!reg.loading && !list.length" description="暂无知识库" :image-size="64">
-        <el-button size="small" type="primary" @click="openNew">创建第一个知识库</el-button>
+      <el-empty v-if="!reg.loading && !list.length" description="暂无 RAG" :image-size="64">
+        <el-button size="small" type="primary" @click="openNew">创建第一个 RAG</el-button>
       </el-empty>
 
       <div v-else class="rc-list">
@@ -200,7 +200,7 @@ async function onDelete(kb) {
 
     <input ref="fileInput" type="file" class="rc-file" accept=".txt,.md" @change="onFileChosen" />
 
-    <el-dialog v-model="dialogOpen" :title="editingId === null ? '新建知识库' : '编辑知识库'" width="520px" append-to-body>
+    <el-dialog v-model="dialogOpen" :title="editingId === null ? '新建 RAG 库' : '编辑 RAG 库'" width="520px" append-to-body>
       <el-form label-width="96px" label-position="left">
         <el-form-item label="名称" required>
           <el-input v-model="form.name" maxlength="128" placeholder="如：runbook-2025" />
@@ -261,14 +261,14 @@ async function onDelete(kb) {
 .rc-count { font-size: 11px; color: var(--ls-fg-dim); background: rgba(127,132,148,.18); border-radius: 999px; padding: 0 6px; }
 .rc-add { margin-left: auto; }
 .rc-body { flex: 1 1 auto; min-height: 0; overflow-y: auto; }
-.rc-list { display: flex; flex-direction: column; gap: 4px; }
-.rc-item { border: 1px solid var(--ls-border); border-radius: 8px; background: var(--ls-bg); padding: 9px 10px 8px; }
+.rc-list { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; align-content: start; }
+.rc-item { display: flex; flex-direction: column; border: 1px solid var(--ls-border); border-radius: 8px; background: var(--ls-bg); padding: 10px 12px 0; }
 .rc-item-main.no-btn { display: flex; }
 .rc-txt { flex: 1 1 auto; min-width: 0; }
 .rc-line1 { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
 .rc-name { font-size: 13px; font-weight: 600; }
 .rc-sub { font-size: 12px; color: var(--ls-fg-dim); margin-top: 2px; }
-.rc-ops { display: flex; align-items: center; gap: 2px; margin-top: 6px; flex-wrap: wrap; }
+.rc-ops { display: flex; align-items: center; gap: 2px; margin-top: 6px; padding: 6px 0 8px; border-top: 1px dashed var(--ls-border); flex-wrap: wrap; }
 .rc-file { display: none; }
 .rc-hint { font-size: 11px; color: var(--ls-fg-dim); line-height: 1.3; margin-top: 2px; }
 .rc-search-bar { display: flex; gap: 8px; }
@@ -279,4 +279,17 @@ async function onDelete(kb) {
 .rc-hit-file { font-size: 12px; font-weight: 600; }
 .rc-hit-score { font-size: 11px; color: var(--ls-fg-dim); }
 .rc-hit-text { margin: 6px 0 0; white-space: pre-wrap; word-break: break-word; font-size: 12px; line-height: 1.55; background: rgba(127,132,148,.1); border-radius: 4px; padding: 6px 8px; max-height: 140px; overflow-y: auto; }
+
+/* —— C6 版末：每类能力一套强调色（RAG=琥珀）。卡片 = 顶缘彩线 + 浅彩卡底；
+     名称/操作行压淡，中部切块/索引信息行着彩出挑；hover 轻浮起 —— */
+.rc-list { grid-template-columns: repeat(2, minmax(0, 1fr)); column-gap: 14px; row-gap: 14px; }
+.rc-item {
+  border-top: 2px solid var(--cc);
+  background: var(--cc-soft);
+  transition: border-color 0.15s, box-shadow 0.15s, transform 0.15s;
+}
+.rc-item:hover { border-color: var(--cc); box-shadow: 0 4px 14px rgba(15, 23, 42, 0.1); transform: translateY(-1px); }
+.rc-name { color: var(--ls-fg-dim); }
+.rc-sub { color: var(--cc); font-weight: 600; }
+.rc-count { color: var(--cc); background: var(--cc-soft2); }
 </style>

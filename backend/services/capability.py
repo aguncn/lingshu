@@ -96,21 +96,38 @@ def get_task_caps(task_id: int) -> dict:
     return _caps_dict(task.id)
 
 
+def _expert_personas(ids: list[int]) -> dict:
+    """取将挂载专家 id → persona 快照（=启用时其 system_prompt 文本，停用 → None）。
+
+    快照语义（C5）：挂载动作定格人设；此后改/停用档案不影响已建任务。停用的专家此刻不落快照，
+    运行时视为「无可用人设」跳过（与既有 disabled 过滤一致），未来重新启用后仍可正常挂载取到快照。
+    """
+    if not ids:
+        return {}
+    rows = db.session.execute(select(Expert).where(Expert.id.in_(ids))).scalars()
+    return {
+        e.id: ((e.system_prompt or "").strip() or None) if e.enabled else None for e in rows
+    }
+
+
 def set_task_caps(task_id: int, payload) -> dict:
     """PUT 全状态覆盖：先整体校验、后单事务 delete→insert，成功返回最新清单。
 
     缺键=清空（把缺失分类当 [] 覆盖写）；parse_caps 在所有删除之前完成，天然保证
     「校验失败不改动原挂载」。写失败（理论极少，因校验已前置）整体回滚不半写。
+    挂载专家时同步落 persona_snapshot（见 _expert_personas）。
     """
     task = get_task_or_raise(task_id)
     parsed = parse_caps(payload)
+    personas = _expert_personas(parsed["experts"])
     try:
         for cat, (_, assoc, _) in _ENTITY_SPEC.items():
             db.session.execute(delete(assoc).where(assoc.task_id == task.id))
         for cat, ids in parsed.items():
             _, assoc, fk_attr = _ENTITY_SPEC[cat]
             for target_id in ids:
-                db.session.add(assoc(task_id=task.id, **{fk_attr: target_id}))
+                extra = {"persona_snapshot": personas.get(target_id)} if cat == "experts" else {}
+                db.session.add(assoc(task_id=task.id, **{fk_attr: target_id}, **extra))
         db.session.commit()
     except Exception:
         db.session.rollback()

@@ -1,5 +1,5 @@
-// 注册中心数据（P5 registry-center）：技能/MCP/知识库/专家 四列表 + byId 名称索引。
-// 注册中心抽屉各 tab 展示用列表；细节栏挂载 tile 用 byId 把 caps 的 id join 成可读行。
+// 能力登记数据（P5 registry-center / C5）：技能/MCP/知识库/运维专家 四列表 + byId 名称索引。
+// 能力广场各整页（技能/MCP/知识库/运维专家 center）+ 细节栏挂载 tile 用 byId 把 caps 的 id join 成可读行。
 // 每类单独隔离失败（try/catch 置空），不让一个接口拖垮其余三类；loadCategory 供变更后局部刷新。
 import { defineStore } from 'pinia'
 

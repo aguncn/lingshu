@@ -90,7 +90,7 @@ async function onDelete(skill) {
 </script>
 
 <template>
-  <div class="rc">
+  <div class="rc rc-skills">
     <div class="rc-head">
       <span class="rc-title">技能库</span>
       <span v-if="list.length" class="rc-count">{{ list.length }}</span>
@@ -175,21 +175,34 @@ async function onDelete(skill) {
 </template>
 
 <style scoped>
-/* 各 center 共用一套 .rc 列表样式（dark 兼容走 CSS 变量） */
+/* 各 center 共用一套 .rc 卡片网格样式（C4：行 → 卡；dark 兼容走 CSS 变量） */
 .rc { display: flex; flex-direction: column; height: 100%; min-width: 0; }
 .rc-head { display: flex; align-items: center; gap: 8px; padding: 2px 2px 10px; }
 .rc-title { font-size: 13px; font-weight: 600; }
 .rc-count { font-size: 11px; color: var(--ls-fg-dim); background: rgba(127,132,148,.18); border-radius: 999px; padding: 0 6px; }
 .rc-add { margin-left: auto; }
 .rc-body { flex: 1 1 auto; min-height: 0; overflow-y: auto; }
-.rc-list { display: flex; flex-direction: column; gap: 4px; }
-.rc-item { border: 1px solid var(--ls-border); border-radius: 8px; background: var(--ls-bg); }
-.rc-item-main { display: flex; align-items: flex-start; gap: 6px; width: 100%; padding: 9px 10px; border: none; background: transparent; color: var(--ls-fg); text-align: left; cursor: pointer; }
+.rc-list { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; align-content: start; }
+.rc-item { display: flex; flex-direction: column; border: 1px solid var(--ls-border); border-radius: 8px; background: var(--ls-bg); }
+.rc-item-main { display: flex; align-items: flex-start; gap: 6px; width: 100%; padding: 10px 12px 6px; border: none; background: transparent; color: var(--ls-fg); text-align: left; cursor: pointer; }
 .rc-caret { margin-top: 2px; flex: none; color: var(--ls-fg-dim); }
 .rc-txt { flex: 1 1 auto; min-width: 0; }
 .rc-line1 { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
 .rc-name { font-size: 13px; font-weight: 600; }
 .rc-sub { font-size: 12px; color: var(--ls-fg-dim); margin-top: 2px; }
-.rc-ops { display: flex; align-items: center; gap: 2px; padding: 0 10px 8px 30px; }
-.rc-md { margin: 0 10px 8px 30px; padding: 10px; background: #0d1117; color: #d6dde8; border-radius: 6px; font-family: Consolas, monospace; font-size: 11.5px; line-height: 1.6; white-space: pre-wrap; word-break: break-word; max-height: 240px; overflow-y: auto; }
+.rc-ops { display: flex; align-items: center; gap: 2px; padding: 6px 10px 8px 12px; margin-top: 6px; border-top: 1px dashed var(--ls-border); flex-wrap: wrap; }
+.rc-md { margin: 0 10px 10px 12px; padding: 10px; background: #0d1117; color: #d6dde8; border-radius: 6px; font-family: Consolas, monospace; font-size: 11.5px; line-height: 1.6; white-space: pre-wrap; word-break: break-word; max-height: 240px; overflow-y: auto; }
+
+/* —— C6 版末：每类能力一套强调色（技能=violet，var(--cc) 见 index.css）。卡片 = 顶缘彩线 + 浅彩卡底，
+     名称行与底部操作行刻意压淡、让中间描述句着色出挑，hover 轻浮起给「可交互」注意 —— */
+.rc-list { grid-template-columns: repeat(2, minmax(0, 1fr)); column-gap: 14px; row-gap: 14px; }
+.rc-item {
+  border-top: 2px solid var(--cc);
+  background: var(--cc-soft);
+  transition: border-color 0.15s, box-shadow 0.15s, transform 0.15s;
+}
+.rc-item:hover { border-color: var(--cc); box-shadow: 0 4px 14px rgba(15, 23, 42, 0.1); transform: translateY(-1px); }
+.rc-name { color: var(--ls-fg-dim); }
+.rc-sub { color: var(--cc); font-weight: 600; }
+.rc-count { color: var(--cc); background: var(--cc-soft2); }
 </style>

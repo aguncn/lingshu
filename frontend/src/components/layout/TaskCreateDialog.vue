@@ -1,12 +1,14 @@
 <script setup>
-// 新建任务对话框：选空间 + title + task_type(受控枚举) + 可选 visibility + 可选场景域（P9）。
-// 「场景模板」默认取顶部域条点选值（ui.taskDialogDomain）；选定域后提交会先建任务、
-// 再 POST apply 自动套用该域预设（挂载 MCP/专家等），成功后展开细节栏让装配立即可见。
+// 新建任务对话框（C5 改造）：选空间 + title + 可选「运维专家」+ 可选 visibility + 权限模式。
+// C5 起去掉「任务类型」与「场景模板」两栏（十二场景域体系硬删）：改选一位运维专家档案——
+// 选中后提交先建任务、再 apply 快照装配（人设快照 + 预设技能/MCP/RAG/资料 + 默认模型落到任务自身），
+// 成功后展开细节栏让装配立即可见；装配失败不阻断创建（任务已落库，降级手动挂载）。
 import { ElMessage } from 'element-plus'
 import { computed, onMounted, reactive, ref, watch } from 'vue'
 
-import { TASK_TYPE_META, VISIBILITY_META } from '../../constants'
-import { useScenarioStore } from '../../stores/scenario'
+import { PERMISSION_MODE_META, PERMISSION_MODE_ORDER, VISIBILITY_META } from '../../constants'
+import { useModelStore } from '../../stores/model'
+import { useRegistryStore } from '../../stores/registry'
 import { useSpaceStore } from '../../stores/space'
 import { useTaskStore } from '../../stores/task'
 import { useUiStore } from '../../stores/ui'
@@ -14,42 +16,52 @@ import { useUiStore } from '../../stores/ui'
 const ui = useUiStore()
 const space = useSpaceStore()
 const task = useTaskStore()
-const scenario = useScenarioStore()
+const reg = useRegistryStore()
+const model = useModelStore()
 
 const visible = computed({
   get: () => ui.taskDialogOpen,
   set: (v) => (ui.taskDialogOpen = v),
 })
 
-// 场景域选项：留空=不绑域（走手动挂载，行为与旧版一致）；其余来自 /api/scenarios 十二域
-const DOMAIN_OPTIONS = computed(() => [
-  { value: '', label: '不绑定（手动挂载）' },
-  ...scenario.domains.map((d) => ({ value: d.domain, label: d.name })),
-])
-
-// 选定域的装配摘要（提示「会自动挂什么」）：未选或清单未载 → null
-const chosenPresetHint = computed(() => {
-  if (!form.scenario_domain) return ''
-  const d = scenario.byDomain[form.scenario_domain]
-  if (!d) return ''
-  const p = d.preset || {}
-  const parts = []
-  if (p.mcps) parts.push(`MCP ${p.mcps}`)
-  if (p.experts) parts.push(`专家 ${p.experts}`)
-  if (p.skills) parts.push(`技能 ${p.skills}`)
-  if (p.kbs) parts.push(`知识库 ${p.kbs}`)
-  return parts.length ? `创建后自动套用该域预设：${parts.join(' · ')}` : '该域无预设，创建后手动挂载'
-})
-
-const form = reactive({ space_id: null, title: '', task_type: 'general', visibility: 'private', scenario_domain: '' })
+const form = reactive({ space_id: null, title: '', visibility: 'private', permission_mode: 'strict', expert_id: null })
 const saving = ref(false)
 
-const TYPE_OPTIONS = Object.entries(TASK_TYPE_META).map(([value, m]) => ({ value, label: m.label }))
 const VIS_OPTIONS = Object.entries(VISIBILITY_META).map(([value, m]) => ({ value, label: m.label }))
+// 权限三档（有序）：label + desc；strict 为默认（=旧行为，最严不打断现状）
+const PERM_OPTIONS = PERMISSION_MODE_ORDER.map((value) => ({
+  value,
+  label: PERMISSION_MODE_META[value].label,
+  desc: PERMISSION_MODE_META[value].desc,
+}))
+// 新建时已选档位的风险注记（未选前给 strict 说明，避免用户误以为无门槛）
+const chosenPermDesc = computed(() =>
+  form.permission_mode ? PERMISSION_MODE_META[form.permission_mode].desc : '',
+)
 
-onMounted(() => scenario.ensureLoaded())
+// 可选运维专家 = 注册表中启用中的档案；未启用者不可套（后端 apply 亦 400），故不列
+const expertOptions = computed(() => reg.experts.filter((e) => e.enabled))
 
-// 打开时预选：当前过滤空间 → 首个空间；场景域取顶部条点选（默认空=不绑域）
+// 档案的装配摘要（提示「套用会自动挂什么」）：技能/MCP/RAG/资料 计数 + 默认模型名
+function expertSubtitle(e) {
+  const parts = []
+  const sk = e.preset_skills || []
+  const mc = e.preset_mcp || []
+  const kb = e.preset_kb || []
+  const lb = e.preset_library || []
+  if (sk.length) parts.push(`技能 ${sk.length}`)
+  if (mc.length) parts.push(`MCP ${mc.length}`)
+  if (kb.length) parts.push(`RAG ${kb.length}`)
+  if (lb.length) parts.push(`资料 ${lb.length}`)
+  const prov = e.default_provider_id ? model.providerById(e.default_provider_id) : null
+  const mdl = (e.default_model_name || '').trim() || (prov ? prov.default_model || '' : '')
+  if (prov) parts.push(mdl ? `模型 ${mdl}` : `默认模型 ${prov.name}`)
+  return parts.length ? `套用即装配：${parts.join(' · ')}` : '空档案：仅人设，建后手动挂载'
+}
+
+onMounted(() => reg.ensureLoaded())
+
+// 打开时预选：当前过滤空间 → 首个空间；每次重置「是否选运维专家」，避免上次选择残留误导
 watch(visible, (v) => {
   if (!v) return
   if (!space.spaces.length) {
@@ -59,13 +71,9 @@ watch(visible, (v) => {
   }
   form.space_id = space.activeSpaceId && space.byId[space.activeSpaceId] ? space.activeSpaceId : space.spaces[0].id
   form.title = ''
-  form.task_type = 'general'
   form.visibility = 'private'
-  form.scenario_domain = ui.taskDialogDomain || ''
-})
-// 关闭即清掉预选域，让顶部 chips 高亮只存在于编排进行中，避免「上次选域」残留误导
-watch(visible, (v) => {
-  if (!v) ui.taskDialogDomain = ''
+  form.expert_id = null
+  form.permission_mode = 'strict' // 每次新建都回默认最严，用户按任务风险显式下调
 })
 
 async function submit() {
@@ -78,19 +86,30 @@ async function submit() {
     return
   }
   saving.value = true
-  const withDomain = !!form.scenario_domain
+  const expert = form.expert_id ? expertOptions.value.find((e) => e.id === form.expert_id) : null
   try {
-    const t = await task.createTask({
+    const { task: t, apply } = await task.createTask({
       space_id: form.space_id,
       title: form.title.trim(),
-      task_type: form.task_type,
       visibility: form.visibility,
-      scenario_domain: form.scenario_domain || undefined, // 有域才触发 store 内 apply
+      permission_mode: form.permission_mode, // 三档权限（strict/limited/trusted）
+      expert_id: form.expert_id || null,
+      expert_name: expert ? expert.name : '',
     })
-    if (withDomain) {
-      // 套用成功：展开细节栏，让「自动挂上 MCP/专家」立即可见（spec 验收观感）
+    if (expert && apply && !apply.error) {
+      // 套用成功：展开细节栏，让「自动挂上人设/技能/MCP/RAG」立即可见（C5 快照装配观感）
       ui.detailOpen = true
-      ElMessage.success(`任务「${t.title}」已创建并套用「${scenario.labelOf(form.scenario_domain)}」预设`)
+      const skipped = apply.skipped || []
+      if (skipped.length) {
+        const reasons = [...new Set(skipped.map((s) => s.reason))]
+        ElMessage.warning(
+          `任务「${t.title}」已创建并套用「${expert.name}」；${skipped.length} 项预设未挂载（${reasons.join('、')}），可在底部「个性设置」里「编辑挂载」补全`,
+        )
+      } else {
+        ElMessage.success(`任务「${t.title}」已创建并套用「${expert.name}」档案`)
+      }
+    } else if (expert && apply && apply.error) {
+      ElMessage.warning(`任务「${t.title}」已创建，但运维专家套用失败：${apply.error}；可稍后手动挂载`)
     } else {
       ElMessage.success(`任务「${t.title}」已创建`)
     }
@@ -115,16 +134,35 @@ async function submit() {
       <el-form-item label="标题" required>
         <el-input v-model="form.title" placeholder="如：支付网关间歇性 502 排障" maxlength="256" @keyup.enter="submit" />
       </el-form-item>
-      <el-form-item label="任务类型">
-        <el-select v-model="form.task_type" style="width: 100%">
-          <el-option v-for="o in TYPE_OPTIONS" :key="o.value" :label="o.label" :value="o.value" />
+      <el-form-item label="运维专家">
+        <el-select
+          v-model="form.expert_id"
+          clearable
+          filterable
+          style="width: 100%"
+          placeholder="可选：套用运维专家档案（不选=建后手动挂载）"
+        >
+          <el-option
+            v-for="e in expertOptions"
+            :key="e.id"
+            :value="e.id"
+            :label="e.name"
+            :title="e.description || ''"
+          >
+            <div class="td-exp">
+              <div class="td-exp-name">{{ e.name }}</div>
+              <div class="td-exp-sub text-dim">{{ e.description || '' }}<template v-if="e.description"> · </template>{{ expertSubtitle(e) }}</div>
+            </div>
+          </el-option>
         </el-select>
+        <div v-if="!expertOptions.length" class="td-hint text-dim">还没有启用的运维专家：可在能力广场「运维专家」页组装档案，或先手动挂载</div>
+        <div v-if="form.expert_id" class="td-hint td-hint-accent">选择后该档案将<strong>快照</strong>到任务（此后改档案不影响本任务）</div>
       </el-form-item>
-      <el-form-item label="场景模板">
-        <el-select v-model="form.scenario_domain" style="width: 100%" placeholder="绑定运维场景，自动装配预设">
-          <el-option v-for="o in DOMAIN_OPTIONS" :key="o.value" :label="o.label" :value="o.value" />
+      <el-form-item label="权限模式">
+        <el-select v-model="form.permission_mode" style="width: 100%">
+          <el-option v-for="o in PERM_OPTIONS" :key="o.value" :label="o.label" :value="o.value" />
         </el-select>
-        <div v-if="chosenPresetHint" class="td-hint text-dim">{{ chosenPresetHint }}</div>
+        <div class="td-hint text-dim">{{ chosenPermDesc }}</div>
       </el-form-item>
       <el-form-item label="可见性">
         <el-select v-model="form.visibility" style="width: 100%">
@@ -144,5 +182,17 @@ async function submit() {
   font-size: 12px;
   margin-top: 4px;
   line-height: 1.5;
+}
+.td-hint-accent {
+  color: var(--ls-accent);
+}
+.td-exp-name {
+  font-size: 13px;
+  font-weight: 500;
+}
+.td-exp-sub {
+  font-size: 11.5px;
+  white-space: normal;
+  line-height: 1.4;
 }
 </style>

@@ -61,6 +61,16 @@ export async function streamChat(taskId, message, { signal, onEvent }) {
 export const sendChatDecision = (taskId, data) =>
   http.post(`/tasks/${taskId}/chat/decision`, data, { silent: true })
 
+// —— 会话保活（session-keepalive）：断连后采纳运行态 / 显式停止 ——
+// 运行态查询：{active:false} | {active:true, run_id, waiting, confirm?:{confirm_id,name,action,reason}}
+//   轮询以刷新孤儿回收判据（后端 status 内 touch），不会把后台 run 误回收。
+export const getChatStatus = (taskId) =>
+  http.get(`/tasks/${taskId}/chat/status`, { silent: true })
+
+// 显式停止当前 run：真正 cancel（区别于 SSE 脱离）；无活动 run 亦幂等 ok
+export const stopChat = (taskId) =>
+  http.post(`/tasks/${taskId}/chat/stop`, {}, { silent: true })
+
 // 升序读任务历史：{task_id, messages:[{id,role,content,run_id,model,created_at}]}
 export const listChatMessages = (taskId) =>
   http.get(`/tasks/${taskId}/messages`, { silent: true })

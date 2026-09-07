@@ -1,95 +1,64 @@
 <script setup>
-// 左栏控制台（design D2 ①~④ / §4.4）：品牌 + 新建任务 + 能力导航 + 空间/任务列表 + 底部入口。
-// 数据冷启动在此编排：空间 → 逐空间任务；模板条与供应商并行（各自失败互不拖累）。
+// 左栏控制台（design D2 ①~④ / §4.4）：品牌 + 新建任务 + 能力广场导航 + 空间树 + 底部入口。
+// C1 起空间不再横向并列铺开：中段头 =「全部空间 (N)」+「新建空间」，下面是可交互空间树(SpaceTree)。
+// C4 起能力导航 = 主区整页广场：资料库/技能/MCP/知识库/运维专家 各自为独立菜单项，点击 → ui.openPlaza(page)。
+//   C5 起「运维专家」=可复用档案组装页，在导航/广场与四中心同级；自动化仍属 P1/P2 范围外不出现在导航。
+// 数据冷启动在此编排：空间 → 逐空间任务；运维专家档案的装载由广场/对话框各自懒加载，与供应商并行不互拖累。
 import {
-  Collection, Cpu, FolderOpened, Plus, Setting, VideoPlay,
+  Collection, Connection, Files, Fold, FolderOpened, Plus, Setting, UserFilled,
 } from '@element-plus/icons-vue'
 import { onMounted } from 'vue'
 
 import { useModelStore } from '../../stores/model'
-import { useScenarioStore } from '../../stores/scenario'
 import { useSpaceStore } from '../../stores/space'
 import { useTaskStore } from '../../stores/task'
 import { useUiStore } from '../../stores/ui'
-import { metaOf, VISIBILITY_META } from '../../constants'
 import SpaceCreateDialog from './SpaceCreateDialog.vue'
+import SpaceTree from './SpaceTree.vue'
 import TaskCreateDialog from './TaskCreateDialog.vue'
-import TaskGroupList from './TaskGroupList.vue'
 
 const ui = useUiStore()
 const space = useSpaceStore()
 const task = useTaskStore()
 
-// 主导航（spec R1）：专家·技能·MCP → 注册中心技能 tab；资料库 → 资料库抽屉；自动化远期占位。
-// 后两者已有真实后端（P5 registry / P6 library），不再只开空态。
-const NAV_ITEMS = [
-  {
-    key: 'cap',
-    label: '专家·技能·MCP',
-    icon: Cpu,
-    kind: 'registry',
-    desc: '能力登记与挂载中心（P5 已交付）：打开注册中心统一管理技能 / MCP / 知识库 / 专家。',
-  },
-  {
-    key: 'automation',
-    label: '自动化',
-    icon: VideoPlay,
-    kind: 'capability',
-    capTitle: '自动化引擎',
-    phase: 'P1/P2',
-    desc: '自动化编排与触发器属远期能力（范围外 P1/P2），本期不提供入口。',
-  },
-  {
-    key: 'library',
-    label: '资料库',
-    icon: FolderOpened,
-    kind: 'library',
-    desc: '集中资料库（P6 已交付）：跨任务复用文件，按 全部/全局/共享/空间 浏览与检索。',
-  },
+// 能力广场页面（C4）：key 与 ui.plazaTab / 广场顶部页签一一对应。
+// 资料库=RAG 是两类易混资产：资料库存「原文全文」，任务按全文原文引用；
+// RAG(知识库)则把文档切块建索引，按关键词/相似度召回命中片段。文案上点明区分。
+const PLAZA_PAGES = [
+  { key: 'library', label: '资料库', icon: FolderOpened, desc: '原文全文引用：整份文档挂载复用' },
+  { key: 'skills', label: '技能', icon: Collection, desc: 'AgentScope 技能库（SKILL.md 指令）' },
+  { key: 'mcps', label: 'MCP', icon: Connection, desc: '外部工具连接器（stdio/http）' },
+  { key: 'kbs', label: 'RAG', icon: Files, desc: '检索切块知识库：文档切块建索引，召回命中片段' },
+  { key: 'experts', label: '运维专家', icon: UserFilled, desc: '可复用智能体档案：人设+技能/MCP/RAG+资料+默认模型，套用到任务即快照' },
 ]
 
-// 导航分流：注册中心 / 资料库走真实抽屉，能力占位仅保留给远期（自动化）项
-function handleNav(item) {
-  if (item.kind === 'registry') {
-    ui.activeNavKey = item.key // 高亮当前项；抽屉开关状态由 store 统一管
-    ui.openRegistry('skills')
-  } else if (item.kind === 'library') {
-    ui.openLibrary() // openLibrary 内部已置 activeNavKey='library'
-  } else {
-    ui.openCapability({ key: item.key, title: item.capTitle, phase: item.phase, desc: item.desc })
-  }
+// 导航点击 → 主区切到该页的整页广场
+function goPage(page) {
+  ui.openPlaza(page.key)
 }
 
-const visColor = (v) => {
-  const m = metaOf(VISIBILITY_META, v)
-  const colorMap = { info: '#7a8494', success: '#67c23a', primary: '#3f7ef7' }
-  return colorMap[m.type] || '#7a8494'
-}
-
-function taskCountOf(sid) {
-  return (task.bySpace[sid] || []).length
-}
-
-function totalTaskCount() {
-  return space.spaces.reduce((sum, s) => sum + taskCountOf(s.id), 0)
-}
-
-// 冷启动装载：空间确定后拉全部空间任务；场景域清单/供应商并行加载（各自失败互不拖累）
+// 冷启动装载：空间确定后拉全部空间任务；模型供应商并行加载（失败互不拖累）。
+// 运维专家档案等注册表数据由广场/挂载面板/建任务对话框各自懒加载（见 ExpertCenter 等）。
 onMounted(async () => {
   await space.ensureLoaded()
   task.loadAll()
-  useScenarioStore().ensureLoaded()
   useModelStore().fetchProviders()
 })
 </script>
 
 <template>
   <div class="lp">
-    <!-- 顶部：品牌 + 新建任务 + 能力导航（固定） -->
+    <!-- 顶部：品牌 + 新建任务 + 能力广场导航（固定） -->
     <div class="lp-top">
       <div class="lp-brand">
-        <div class="lp-logo">灵枢</div>
-        <div class="lp-sub">IT 运维智能体 · 工作台</div>
+        <div class="lp-brand-id">
+          <div class="lp-logo">灵枢</div>
+          <div class="lp-sub">IT 运维智能体 · 工作台</div>
+        </div>
+        <!-- 收起整栏：点它把左导航折起，主区占满（Workbench 左缘会浮出展开钮还原） -->
+        <el-tooltip content="收起导航" placement="right">
+          <el-button class="lp-collapse" text circle :icon="Fold" @click="ui.setLeftCollapsed(true)" />
+        </el-tooltip>
       </div>
 
       <el-button class="lp-new-task" type="primary" :icon="Plus" @click="ui.openCreateTask()">
@@ -97,54 +66,36 @@ onMounted(async () => {
       </el-button>
 
       <div class="lp-nav">
-        <div class="lp-nav-label">能力导航</div>
+        <div class="lp-nav-label">能力广场</div>
         <button
-          v-for="item in NAV_ITEMS"
-          :key="item.key"
+          v-for="p in PLAZA_PAGES"
+          :key="p.key"
           class="lp-nav-item"
-          :class="{ active: ui.activeNavKey === item.key }"
+          :class="{ active: ui.mainView === 'plaza' && ui.activeNavKey === p.key }"
           type="button"
-          @click="handleNav(item)"
+          :title="p.desc"
+          @click="goPage(p)"
         >
-          <el-icon><component :is="item.icon" /></el-icon>
-          <span class="ellipsis">{{ item.label }}</span>
+          <el-icon><component :is="p.icon" /></el-icon>
+          <span class="ellipsis">{{ p.label }}</span>
         </button>
       </div>
     </div>
 
-    <!-- 中段：空间过滤 + 任务分组（可滚动） -->
+    <!-- 中段：空间头（全部计数 + 新建按钮）+ 空间树（可滚动） -->
     <div class="lp-scroll">
       <div class="lp-section-head">
-        <div class="lp-spaces" @click.stop>
-          <button
-            class="lp-space-chip"
-            :class="{ active: space.activeSpaceId === null }"
-            type="button"
-            title="全部空间"
-            @click="space.selectSpace(null)"
-          >
-            <el-icon><Collection /></el-icon>
-            <span>全部</span>
-            <span class="lp-chip-count">{{ totalTaskCount() }}</span>
-          </button>
-          <el-tooltip
-            v-for="s in space.spaces"
-            :key="s.id"
-            :content="`${s.name}（${s.visibility}）`"
-            placement="top"
-          >
-            <button
-              class="lp-space-chip"
-              :class="{ active: space.activeSpaceId === s.id }"
-              type="button"
-              @click="space.selectSpace(s.id)"
-            >
-              <span class="lp-dot" :style="{ background: visColor(s.visibility) }" />
-              <span class="ellipsis">{{ s.name }}</span>
-              <span class="lp-chip-count">{{ taskCountOf(s.id) }}</span>
-            </button>
-          </el-tooltip>
-        </div>
+        <button
+          class="lp-space-all"
+          :class="{ active: space.activeSpaceId === null }"
+          type="button"
+          title="查看全部空间的任务"
+          @click="space.selectSpace(null)"
+        >
+          <el-icon><FolderOpened /></el-icon>
+          <span>全部空间</span>
+          <span class="lp-space-count">{{ space.spaces.length }}</span>
+        </button>
         <el-button
           class="lp-add-space"
           link
@@ -155,10 +106,10 @@ onMounted(async () => {
         </el-button>
       </div>
 
-      <TaskGroupList />
+      <SpaceTree />
     </div>
 
-    <!-- 底部：个人信息 + 注册中心/设置入口 -->
+    <!-- 底部：个人信息 + 设置入口（注册中心已并入上方广场导航） -->
     <div class="lp-foot">
       <div class="lp-user">
         <el-avatar :size="26" class="lp-avatar">a</el-avatar>
@@ -168,11 +119,6 @@ onMounted(async () => {
         </div>
       </div>
       <div class="lp-foot-actions">
-        <el-tooltip content="注册中心" placement="top">
-          <el-button class="lp-foot-btn" text circle @click="ui.openRegistry('skills')">
-            <el-icon><Collection /></el-icon>
-          </el-button>
-        </el-tooltip>
         <el-tooltip content="设置" placement="top">
           <el-button class="lp-foot-btn" text circle @click="ui.settingsOpen = true">
             <el-icon><Setting /></el-icon>
@@ -203,9 +149,17 @@ onMounted(async () => {
 }
 .lp-brand {
   display: flex;
-  align-items: baseline;
+  align-items: center;
   gap: 8px;
   margin-bottom: 12px;
+}
+.lp-brand-id {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
 }
 .lp-logo {
   font-size: 18px;
@@ -217,6 +171,17 @@ onMounted(async () => {
   font-size: 11px;
   color: var(--ls-left-fg-dim);
   letter-spacing: 0.5px;
+  white-space: nowrap;
+}
+/* 收起钮：靠右吸边，hover 提亮，避免与品牌名挤在一行 */
+.lp-collapse {
+  margin-left: auto;
+  flex: none;
+  color: var(--ls-left-fg-dim);
+}
+.lp-collapse:hover {
+  color: var(--ls-accent);
+  background: transparent;
 }
 .lp-new-task {
   width: 100%;
@@ -265,41 +230,46 @@ onMounted(async () => {
   gap: 6px;
   margin: 2px 4px 8px;
 }
-.lp-spaces {
-  display: flex;
-  gap: 6px;
-  overflow-x: auto;
-  scrollbar-width: none;
-  min-width: 0;
-}
-.lp-space-chip {
+/* 全部空间：左侧计数按钮（activeSpaceId===null 时高亮 = 当前查看全部） */
+.lp-space-all {
   display: flex;
   align-items: center;
-  gap: 5px;
-  max-width: 120px;
-  padding: 3px 8px;
-  border: 1px solid var(--ls-left-border);
-  border-radius: 999px;
+  gap: 6px;
+  min-width: 0;
+  padding: 4px 8px;
+  border: none;
+  border-radius: 6px;
   background: transparent;
   color: var(--ls-left-fg);
-  font-size: 12px;
+  font-size: 12.5px;
+  font-weight: 600;
   cursor: pointer;
-  white-space: nowrap;
 }
-.lp-space-chip.active {
-  background: var(--ls-accent);
-  border-color: var(--ls-accent);
-  color: #fff;
+.lp-space-all:hover {
+  background: var(--ls-left-bg-hi);
 }
-.lp-dot {
-  width: 6px;
-  height: 6px;
-  border-radius: 50%;
-  flex: none;
+.lp-space-all.active {
+  background: rgba(63, 126, 247, 0.22);
+  color: #dfe8ff;
 }
-.lp-chip-count {
+.lp-space-all .el-icon {
+  font-size: 14px;
+  color: var(--ls-left-fg-dim);
+}
+.lp-space-all.active .el-icon {
+  color: #dfe8ff;
+}
+.lp-space-count {
   font-size: 11px;
-  opacity: 0.75;
+  color: var(--ls-left-fg-dim);
+  background: var(--ls-left-bg-hi);
+  border-radius: 999px;
+  padding: 0 6px;
+  line-height: 16px;
+}
+.lp-space-all.active .lp-space-count {
+  color: #dfe8ff;
+  background: rgba(255, 255, 255, 0.12);
 }
 .lp-add-space {
   flex: none;

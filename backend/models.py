@@ -16,8 +16,11 @@ def _utcnow() -> str:
 # —— 受控取值（字符串列白名单）——
 VISIBILITIES = {"private", "team", "public"}
 MEMBERSHIP_ROLES = {"Owner", "Editor", "Viewer"}
-TASK_TYPES = {"fault", "change", "alert", "general"}  # 本期最小白名单，P9 十二域再扩展
+TASK_TYPES = {"fault", "change", "alert", "general"}  # 本期最小白名单；保留列，新建对话框已不再暴露
 TASK_STATUSES = {"open", "in_progress", "done"}
+# 任务级工具权限模式（task-permission-modes）：值序即前端展示序；白名单集中于此，models/api/service 共用。
+# 语义映射见 services/agent_runtime.py 的 _permission_context_for（strict/limited/trusted ↔ AgentScope 模式+规则）。
+TASK_PERMISSION_MODES = {"strict", "limited", "trusted"}
 USER_ROLES = {"owner"}
 # 模型供应商 type 白名单（§5.2 ModelProvider.type；local=本地/占位，无需密钥）
 MODEL_PROVIDER_TYPES = {"openai", "deepseek", "dashscope", "local"}
@@ -27,26 +30,7 @@ PRESET_TASK_NAMES = ("写文档", "写代码", "数据分析", "排障")
 # 能力实体取值白名单（P4 仅落 schema，P5 registry-center 在此之上定义并扩充值域）
 MCP_TRANSPORTS = {"stdio", "http"}  # §5.2 AD-02：MCP 传输方式二选一
 KB_STATUSES = {"draft", "ready", "disabled"}  # AD-03：seed 'ready'=可检索；解析/上架生命周期由 P5 细化
-EXPERT_ROLES = {"ops-sme", "general"}  # AD-04：人设领域短标签（单专家 demo，多专家协作 P1 再扩充）
-# —— P9 十二运维场景域（设计 §8 表）：受控枚举，(domain 键, 展示名) 有序元组 ——
-# 域键即 prompts/scenarios/<domain>.md 文件名与 Task.scenario_domain 取值；此处集中维护，
-# models 校验 / scenario api / runtime 注入 / seed 共用同一来源，避免四处硬编码漂移。
-# 顺序固定 = 列表接口/前端分类的展示序（对齐 §8 表自上而下）。
-SCENARIO_DOMAINS = (
-    ("monitor-inspection", "监控巡检"),
-    ("log-triage", "日志隐患"),
-    ("db-performance", "数据库性能排查"),
-    ("middleware-setup", "中间件安装配置"),
-    ("alert", "告警"),
-    ("fault-diagnosis", "故障诊断"),
-    ("change-risk", "变更风险"),
-    ("capacity-forecast", "容量预测"),
-    ("cmdb-governance", "CMDB 数据治理"),
-    ("kb-qa", "知识库问答"),
-    ("runbook-generation", "应急预案生成"),
-    ("ops-scripting", "运维脚本编写"),
-)
-SCENARIO_KEYS = {key for key, _label in SCENARIO_DOMAINS}
+EXPERT_ROLES = {"ops-sme", "general"}  # 运维专家档案内部分类短标签（ops-sme=资深 SRE；其余 general）
 
 
 class TimestampMixin:
@@ -155,10 +139,12 @@ class Task(TimestampMixin, db.Model):
     title = db.Column(db.String(256), nullable=False)
     task_type = db.Column(db.String(32), nullable=False)
     status = db.Column(db.String(16), nullable=False, default="open")
-    scenario_domain = db.Column(db.String(64))  # 十二域占位，值域由 P9 场景模板定义
     visibility = db.Column(db.String(16), nullable=False, default="private")
     # 模型占位：本表对应 P3 的 model_configs 尚未创建，故为普通整数列、无 FK
     model_config_id = db.Column(db.Integer)
+    # 任务级工具权限模式（task-permission-modes）：strict/limited/trusted，缺省 strict（=现状最严）。
+    # 建任务可选、细节栏可改；每次 chat 装配 Agent 时读本值定 PermissionMode，仅影响后续运行。
+    permission_mode = db.Column(db.String(16), nullable=False, default="strict")
 
     space = db.relationship("Space", back_populates="tasks")
     file_records = db.relationship(
@@ -186,9 +172,9 @@ class Task(TimestampMixin, db.Model):
             "title": self.title,
             "task_type": self.task_type,
             "status": self.status,
-            "scenario_domain": self.scenario_domain,
             "visibility": self.visibility,
             "model_config_id": self.model_config_id,
+            "permission_mode": self.permission_mode,
             "created_at": self.created_at,
             "updated_at": self.updated_at,
         }
@@ -485,16 +471,33 @@ class KnowledgeChunk(TimestampMixin, db.Model):
 
 
 class Expert(TimestampMixin, db.Model):
-    """专家（CAP-04/AD-04）。composed_of 存协作子专家 id 列表（P1 多专家编排用），空=单专家。"""
+    """运维专家档案（C5 把专家从纯人设升格为可复用智能体档案）。
+
+    一份档案 = name + description + system_prompt(人设) + 四类预设 id 数组
+    （preset_skills/preset_mcp/preset_kb/preset_library，分别指 Skill / MCPConnector /
+    KnowledgeBase / LibraryFile）+ 可选默认模型（default_provider_id → model_providers，
+    default_model_name 空则用该供应商 default_model）。任务「套用档案」= 把以上快照落成
+    该任务自身挂载/绑定（见 services/expert_profile.apply_expert_profile）；此后改档案
+    不影响已建任务。composed_of 为 P1 多专家协作遗留列：本期保留但不暴露语义（deprecated）。
+    """
 
     __tablename__ = "experts"
 
     id = db.Column(db.Integer, primary_key=True)
     name = db.Column(db.String(128), nullable=False, unique=True)
     description = db.Column(db.String(512))
-    system_prompt = db.Column(db.Text)  # 人设与流程；P8 作为系统提示注入
-    role = db.Column(db.String(32), nullable=False, default="general")
-    composed_of = db.Column(db.JSON)  # 协作子专家 id 列表
+    system_prompt = db.Column(db.Text)  # 人设与流程；套用后作为任务系统提示来源
+    role = db.Column(db.String(32), nullable=False, default="general")  # 内部分类短标签
+    # —— C5 档案预设（db.JSON 存 id 数组，沿用 args/composed_of 先例；空数组 = 该维度无预设）——
+    preset_skills = db.Column(db.JSON, nullable=False, default=list)
+    preset_mcp = db.Column(db.JSON, nullable=False, default=list)
+    preset_kb = db.Column(db.JSON, nullable=False, default=list)
+    preset_library = db.Column(db.JSON, nullable=False, default=list)
+    default_provider_id = db.Column(  # 可选默认模型供应商；删供应商时置空（SET NULL）
+        db.Integer, db.ForeignKey("model_providers.id", ondelete="SET NULL")
+    )
+    default_model_name = db.Column(db.String(128))  # 空 = 用供应商 default_model
+    composed_of = db.Column(db.JSON)  # 遗留列：P1 多专家协作用，本期不暴露
     enabled = db.Column(db.Boolean, nullable=False, default=True)
 
     def to_dict(self) -> dict:
@@ -504,6 +507,12 @@ class Expert(TimestampMixin, db.Model):
             "description": self.description,
             "system_prompt": self.system_prompt,
             "role": self.role,
+            "preset_skills": self.preset_skills or [],
+            "preset_mcp": self.preset_mcp or [],
+            "preset_kb": self.preset_kb or [],
+            "preset_library": self.preset_library or [],
+            "default_provider_id": self.default_provider_id,
+            "default_model_name": self.default_model_name,
             "composed_of": self.composed_of,
             "enabled": self.enabled,
             "created_at": self.created_at,
@@ -572,7 +581,11 @@ class TaskKb(TimestampMixin, db.Model):
 
 
 class TaskExpert(TimestampMixin, db.Model):
-    """任务挂载专家（CAP-04）。"""
+    """任务挂载专家（CAP-04）。persona_snapshot = 挂载时对专家 system_prompt 的快照文本。
+
+    快照语义（C5）：任务人设取挂载行快照而非实时读档案，改档案/停用档案不影响已建任务；
+    早期手工挂载（0010 之前）无快照 → 运行时回退读专家实体当前 system_prompt。
+    """
 
     __tablename__ = "task_expert"
     __table_args__ = (db.UniqueConstraint("task_id", "expert_id"),)
@@ -584,6 +597,7 @@ class TaskExpert(TimestampMixin, db.Model):
     expert_id = db.Column(
         db.Integer, db.ForeignKey("experts.id", ondelete="CASCADE"), nullable=False
     )
+    persona_snapshot = db.Column(db.Text)  # 挂载时对 system_prompt 的拷贝；空=沿用实体当前值
 
     task = db.relationship("Task", back_populates="expert_mounts")
 
@@ -614,9 +628,12 @@ class Message(TimestampMixin, db.Model):
     content = db.Column(db.Text, nullable=False)
     run_id = db.Column(db.String(64))
     model = db.Column(db.String(256))  # 运行模型展示标识（provider/model），不含密钥
+    # 助手回合过程 trace（session-trace-ui）：有序步骤 [{kind, ...}] 的 JSON，随助手消息落库供回放。
+    # 仅成功且产生最终文本的助手消息写入；纯文本回合/旧行为 NULL（to_dict 省略该字段，向后兼容）。
+    trace = db.Column(db.JSON)
 
     def to_dict(self) -> dict:
-        return {
+        d = {
             "id": self.id,
             "task_id": self.task_id,
             "role": self.role,
@@ -626,6 +643,10 @@ class Message(TimestampMixin, db.Model):
             "created_at": self.created_at,
             "updated_at": self.updated_at,
         }
+        # 可选新增字段：仅当非 None 才输出，旧消息/旧客户端不受影响（spec 兼容场景）
+        if self.trace is not None:
+            d["trace"] = self.trace
+        return d
 
 
 class AuditLog(db.Model):
@@ -669,43 +690,3 @@ class AuditLog(db.Model):
         }
 
 
-# ============================================================
-# P9 十二运维场景域（scenario-templates，0007 建表）
-# ============================================================
-
-
-class ScenarioTemplate(TimestampMixin, db.Model):
-    """十二运维场景域模板（P9，design D1/D3）：每域一条，域提示词 + 任务引导 + 预设装配。
-
-    system_prompt 以 backend/prompts/scenarios/<domain>.md 为唯一来源（seed 幂等装载，
-    默认不覆盖人工改动，见 scenario design D1）；preset_* 存四类能力实体 id 数组——
-    注册中心实体是动态 CRUD，引用允许随时间漂移，apply 时交现存+可用实体集合并跳过失效项
-    （design D3）。列用 db.JSON（SQL 层 TEXT，沿用 args/composed_of 先例），可空 = 无装配。
-    """
-
-    __tablename__ = "scenario_templates"
-
-    id = db.Column(db.Integer, primary_key=True)
-    domain = db.Column(db.String(64), nullable=False, unique=True)
-    name = db.Column(db.String(64), nullable=False)  # 中文展示名（§8 表 label）
-    system_prompt = db.Column(db.Text, nullable=False)  # 领域系统提示（唯一来源 .md）
-    task_template = db.Column(db.Text)  # 任务引导/建任务预填文本；可空
-    preset_skills = db.Column(db.JSON, nullable=False, default=list)
-    preset_mcp = db.Column(db.JSON, nullable=False, default=list)
-    preset_kb = db.Column(db.JSON, nullable=False, default=list)
-    preset_expert = db.Column(db.JSON, nullable=False, default=list)
-
-    def to_dict(self) -> dict:
-        return {
-            "id": self.id,
-            "domain": self.domain,
-            "name": self.name,
-            "system_prompt": self.system_prompt,
-            "task_template": self.task_template,
-            "preset_skills": self.preset_skills or [],
-            "preset_mcp": self.preset_mcp or [],
-            "preset_kb": self.preset_kb or [],
-            "preset_expert": self.preset_expert or [],
-            "created_at": self.created_at,
-            "updated_at": self.updated_at,
-        }

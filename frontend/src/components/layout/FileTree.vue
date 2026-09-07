@@ -12,6 +12,9 @@ import LibraryAttachDialog from './LibraryAttachDialog.vue'
 
 const task = useTaskStore()
 
+// C3：抽屉内复用时由抽屉头部承担标题，bare 隐藏自身区段头（避免「文件」双重出现）
+defineProps({ bare: { type: Boolean, default: false } })
+
 const files = computed(() => task.activeTaskFiles)
 const activeTaskId = computed(() => task.activeTaskId)
 // 容错：合并接口给每行带 kind；老缓存行无 kind 按工作文件处理
@@ -46,7 +49,7 @@ function reload() {
 
 <template>
   <div class="ft">
-    <div class="ft-head">
+    <div v-if="!bare" class="ft-head">
       <span class="ft-title">文件</span>
       <span v-if="files.length" class="ft-count">{{ files.length }}</span>
     </div>
@@ -55,7 +58,7 @@ function reload() {
       <EmptyState
         v-if="!task.filesLoading && !files.length"
         description="暂无文件"
-        tip="工作文件由上传/智能体产出落盘；资料可在细节栏「资料」分区添加引用"
+        tip="工作文件由上传/智能体产出落盘；资料可在输入框底部「个性设置」的「资料」分区添加引用"
         retry
         @retry="reload"
       />

@@ -27,6 +27,28 @@ export const PROVIDER_TYPE_META = {
   local: { label: '本地', type: 'info' },
 }
 
+// —— 任务权限模式（task-permission-modes，取值白名单对齐 backend/models.TASK_PERMISSION_MODES）——
+// 三档决定「模型调用工具时是否需人工二次确认」；细节可调（运行中的 run 不受影响，下次发送生效）。
+export const PERMISSION_MODE_META = {
+  strict: {
+    label: '严格',
+    type: 'danger',
+    desc: '所有写/执行类工具（Bash/Write/Edit/PowerShell）都要确认，安全但频繁打断',
+  },
+  limited: {
+    label: '有限',
+    type: 'warning',
+    desc: '只读与一般命令自动放行；仅删除/覆盖命令与修改本地文件（Write/Edit）时确认一次',
+  },
+  trusted: {
+    label: '完全信任',
+    type: 'success',
+    desc: '全程无人工确认，模型按系统提示约束自我把关（信任模型行为）',
+  },
+}
+
+export const PERMISSION_MODE_ORDER = ['strict', 'limited', 'trusted']
+
 // —— P5 registry-center 枚举徽标（取值白名单对齐 backend/models.py 顶部常量）——
 export const EXPERT_ROLE_META = {
   'ops-sme': { label: '运维专家', type: 'primary' },

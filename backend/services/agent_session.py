@@ -5,8 +5,13 @@
 #   改从 decision_queue 取用户回执（经 POST /chat/decision 跨请求投递），收齐后以 UserConfirmResultEvent 续跑。
 # 为什么线程+queue 而非同线程 await：Flask 是同步框架，而 reply_stream 是异步流式生成器，二者经
 #   「worker 线程独占 loop + 线程安全队列」解耦（design D4）；决策经队列跨 HTTP 请求唤醒，无需同一条连接回写。
-# 生命周期：SSE 断开（生成器 close/异常）→ cancel()（唤醒决策等待/流式循环）→ dispose()
-#   （join 线程；MCP 已在 worker finally 关闭）→ 该任务可再次发起 chat。
+# 生命周期（保活版，session-keepalive）：SSE 断开 ≠ 取消 run——生成器被 close/异常只算「脱离」，
+#   worker 继续把 run 跑完，并在 finally 里 push done/error *之后*自注销 unregister（同线程先后序），
+#   覆盖「run 已结束但消费端早已脱离、没读到 done」的泄漏面；
+#   读端在「读到终端帧自然结束」时也幂等 unregister（generate finally），保证结束后可立即再发起 chat，
+#   不依赖 worker 调度时序（见 events() 的 _done_seen）；
+#   停留待确认（park）且长时间无消费端刷新 → 后台 reaper 按 TTL 自动 cancel 并释放槽位（防永久 409）；
+#   显式停止走 POST /tasks/<id>/chat/stop（cancel+join+unregister）；返回采纳/重显确认走 GET .../chat/status。
 # 事件→SSE 映射（spec R2/R3）：TextBlockDelta→text_delta、ThinkingBlockDelta→thinking_delta、
 #   ToolCall 结束→tool_call（名+参数）、ToolResult 结束→tool_result（名+成败+摘要）、
 #   park→confirm_request、终端→done；模型解析失败/运行异常→error。密钥值绝不进任何事件。
@@ -14,6 +19,7 @@ import asyncio
 import json
 import queue
 import threading
+import time
 import uuid
 
 from . import audit as audit_svc
@@ -60,6 +66,19 @@ _DETAIL_LIMIT = 1000
 _RESULT_LIMIT = 2000
 _POLL_INTERVAL = 0.05  # 决策等待轮询间隔（秒）：queue.Queue 跨线程非阻塞取 + 短暂让出
 
+# 二次确认的固定提示语：confirm_request 事件与 /chat/status 重显确认复用同一文案，前端不用硬编码。
+CONFIRM_REASON = "该内置写/执行类工具可能改动系统状态，需你确认放行"
+
+# SSE 空闲保活：会话停驻（待确认/长思考）时无事件帧，若长时间零字节，网关/浏览器可能按空闲掐断长连接；
+# 故 events() 每超过该间隔无帧就发一条 SSE 注释帧 ": ping"（前端解析器须跳过非 data: 行）。
+_HEARTBEAT_SECONDS = 10.0
+# park 回收 TTL：停留在「待用户回执」且消费端 beat 刷新超过该时长 → 视为无人认领的挂起确认，自动取消。
+# 前台停留确认时消费端约每 0.5s 刷新 beat（events 读循环），绝无 10 分钟不刷新的前台场景；
+# 后台跑着的 run 未 park 时不受此限（worker 跑完自注销）。TTL 只兜底「真没人看着」的 park，防 409 泄漏。
+_CONSUMER_TTL = 600.0
+# 孤儿回收守护线程的扫描间隔
+_REAP_INTERVAL = 30.0
+
 
 def _sse(**fields) -> str:
     """事件 dict → SSE 帧（UTF-8 JSON，`data:` 行 + 空行）。"""
@@ -81,6 +100,9 @@ class ChatSession:
         self.pending: dict = {}  # confirm_id → ToolCallBlock（尚未回执，single-use）
         self._cancelled = threading.Event()
         self._thread = None
+        # —— 保活生命周期：消费端最近活跃时刻 + 是否已读到终端帧 ——
+        self._last_consumer_seen = time.monotonic()  # events/status/decision 刷新，reaper 据此判孤儿
+        self._done_seen = False  # events() 以「读到 done/error 终端帧」正常结束 → generate 收尾释放槽位
         self._connected_mcp: list = []
         # worker 侧运行缓冲
         self._assistant_text: list[str] = []
@@ -88,6 +110,9 @@ class ChatSession:
         self._tool_args: dict = {}
         self._tool_result_text: dict = {}
         self._tool_result_name: dict = {}
+        # session-trace-ui：助手回合有序 trace 步骤 + 未闭合 thinking 缓冲（worker 单线程内累积）
+        self._steps: list = []  # [{kind: thinking|confirm|tool_call|tool_result, ...}]，按事件完成序
+        self._thinking: list = []  # 待归并的 thinking delta（连续思考归并为一块）
 
     # ---- 创建与启动 ----
     @classmethod
@@ -119,9 +144,12 @@ class ChatSession:
                     if not self._cancelled.is_set():
                         self._push({"type": "error", "run_id": run_id, "message": f"运行异常：{e}"})
                 finally:
-                    # 正常跑完/异常都以 done 收尾，SSE 生成器据此结束；被取消则不打扰已断开的连接
+                    # 正常跑完/异常都以 done 收尾，SSE 生成器据此结束；被取消则不打扰已断开的连接。
+                    # 无论是否取消，都自注销释放注册表槽位：run 结束即让出，任务可再次发起 chat。
+                    # 覆盖「worker 已跑完但消费端早已脱离、没读到 done」的泄漏面（detach 不清 cancel）。
                     if not self._cancelled.is_set():
                         self._push({"type": "done", "run_id": run_id})
+                    unregister(self.task_id)
 
         self._thread = threading.Thread(
             target=_worker, name=f"ls-session-{self.task_id}", daemon=True
@@ -163,9 +191,11 @@ class ChatSession:
         if ok and not self._cancelled.is_set():
             full = "".join(self._assistant_text).strip()
             if full:
+                self._close_thinking()  # run 结束：闭合可能残留的末尾 thinking 块
+                trace = self._steps or None  # 纯文本回合 steps 为空 → None（to_dict 省略该字段）
                 message_svc.add_assistant_message(
                     self.task_id, full, run_id=self.run_id,
-                    model=self.label.get("model"),
+                    model=self.label.get("model"), trace=trace,
                 )
 
     async def _run_once(self, inputs):
@@ -212,7 +242,9 @@ class ChatSession:
         if ev["ThinkingBlockDeltaEvent"] is not None and isinstance(
             event, ev["ThinkingBlockDeltaEvent"]
         ):
-            self._push({"type": "thinking_delta", "run_id": run_id, "delta": event.delta or ""})
+            delta = event.delta or ""
+            self._thinking.append(delta)  # 累计缓冲：归并为 thinking trace 步骤（_close_thinking 处闭合）
+            self._push({"type": "thinking_delta", "run_id": run_id, "delta": delta})
             return
         # 工具调用开始：登记 id→name（后续事件多只带 tool_call_id）
         if isinstance(event, ev["ToolCallStartEvent"]):
@@ -225,13 +257,19 @@ class ChatSession:
                 self._tool_args.get(event.tool_call_id, "") + (event.delta or "")
             )
             return
-        # 工具调用结束：参数齐备 → 推 tool_call（名+参数）
+        # 工具调用结束：参数齐备 → 推 tool_call（名+参数）+ 落 trace 步骤
         if isinstance(event, ev["ToolCallEndEvent"]):
             raw = self._tool_args.get(event.tool_call_id, "")
             try:
                 arguments = json.loads(raw) if raw.strip() else {}
             except (ValueError, TypeError):
                 arguments = raw[: _DETAIL_LIMIT]
+            self._close_thinking()  # 先闭合悬挂 thinking，保证顺序（thinking 在调用前）
+            self._steps.append({
+                "kind": "tool_call",
+                "name": self._tool_name.get(event.tool_call_id, ""),
+                "args": arguments,
+            })
             self._push({
                 "type": "tool_call", "run_id": run_id,
                 "name": self._tool_name.get(event.tool_call_id, ""),
@@ -257,6 +295,10 @@ class ChatSession:
             ok = state == "success"
             summary = (self._tool_result_text.get(tid, "") or "")[:_RESULT_LIMIT]
             tname = self._tool_result_name.get(tid) or self._tool_name.get(tid, "")
+            self._close_thinking()
+            self._steps.append({
+                "kind": "tool_result", "name": tname, "ok": ok, "summary": summary,
+            })
             self._push({
                 "type": "tool_result", "run_id": run_id, "name": tname,
                 "ok": ok, "summary": summary,
@@ -278,6 +320,31 @@ class ChatSession:
             )
             return
 
+    # ---- session-trace-ui：trace 步骤构建 ----
+    def _close_thinking(self) -> None:
+        """把未闭合的 thinking 缓冲归并为一块 thinking 步骤；缓冲空则置空跳过。
+
+        触发点：每 append 一个 confirm/tool 步骤之前、及 run 结束落 trace 前调用，
+        保证连续思考块在 trace 里是单步、且排在随后的事件之前（worker 单线程内安全）。
+        """
+        text = "".join(self._thinking).strip()
+        self._thinking = []
+        if text:
+            self._steps.append({"kind": "thinking", "text": text})
+
+    def _record_confirm(self, name: str, allow: bool) -> None:
+        """把一次二次确认决策落 trace：confirm 步骤带 decision。
+
+        allow=放行后该工具才真正执行（trace 顺序恒为 tool_call→confirm→tool_result）；
+        deny=拒绝则工具不产生任何写副作用，但 AgentScope 仍回 ok=false 的结果帧，
+        故 trace 同样以 tool_call→confirm(deny)→tool_result(ok=false) 收尾，与 SSE 一致。
+        """
+        self._close_thinking()
+        self._steps.append({
+            "kind": "confirm", "name": name,
+            "decision": "allow" if allow else "deny",
+        })
+
     async def _await_decisions(self, parked) -> list | None:
         """注册并广播 confirm_request 后，等待该批全部回执；被取消返回 None。
 
@@ -293,7 +360,7 @@ class ChatSession:
                 "type": "confirm_request", "run_id": self.run_id,
                 "confirm_id": tc.id, "name": tc.name,
                 "action": (tc.input or "")[:_DETAIL_LIMIT],  # 待确认动作摘要（截断），不入密钥
-                "reason": "该内置写/执行类工具可能改动系统状态，需你确认放行",
+                "reason": CONFIRM_REASON,
             })
         results = []
         for tc in parked.tool_calls:
@@ -312,6 +379,7 @@ class ChatSession:
                     result="allow" if allow else "deny",
                     detail=f"工具 {tc.name} 用户{'放行' if allow else '拒绝'}",
                 )
+                self._record_confirm(tc.name, allow)  # trace：confirm 步骤（deny 亦回 ok=false 结果帧）
                 results.append(ev["ConfirmResult"](confirmed=allow, tool_call=tc, rules=None))
                 break
             else:
@@ -328,26 +396,63 @@ class ChatSession:
         """决策端点投递回执；confirm_id 未注册/已消费 → False（端点转 404）。"""
         if confirm_id not in self.pending:
             return False
+        self.touch()  # 采纳/回执也是一种「有人在看」：刷新孤儿回收判据
         self.decision_queue.put({"confirm_id": confirm_id, "allow": allow})
         return True
 
+    def touch(self) -> None:
+        """活跃打点：消费端（events/status 轮询/decision 回执）在看本会话，刷新 reaper 判据。"""
+        self._last_consumer_seen = time.monotonic()
+
+    @property
+    def done_consumed(self) -> bool:
+        """SSE 消费端是否已读到终端帧（done/error）。generate 收尾据此决定是否幂等释放槽位。"""
+        return self._done_seen
+
+    def is_parked(self) -> bool:
+        """是否有待用户回执的确认（worker 正停在 _await_decisions 等人）→ reaper 据此判回收。"""
+        return bool(self.pending)
+
+    def current_confirm(self) -> dict | None:
+        """当前「待回执确认」摘要（/chat/status 采纳/重显用）；无 → None。
+        仅取该批首个：前端逐条回执后重查 status，批内其余确认会依次浮现。"""
+        if not self.pending:
+            return None
+        tc = next(iter(self.pending.values()))
+        return {
+            "confirm_id": tc.id,
+            "name": tc.name,
+            "action": (tc.input or "")[:_DETAIL_LIMIT],  # 摘要截断同 confirm_request，不入密钥
+            "reason": CONFIRM_REASON,
+        }
+
     # ---- 对外读取（SSE 生成器侧）----
     def events(self):
-        """阻塞读 msg_queue 直到收到终端事件（done/error）或会话被取消。
+        """阻塞读 msg_queue 直到收到终端事件（done/error）或会话被取消/断开。
 
         为什么不能以「worker 线程结束」作为终止判据：worker 在 finally 里 push done/error
         *之后*才退出，二者是 happens-before 关系——若消费方此刻才进入、线程已退出，按线程
         存活判据会提前返回，把尚在队列里的 done 漏掉（快脚本下常见的竞态）。故只认终端帧
-        或显式取消；worker 未取消时必以 done/error 收尾（见 _worker finally），队列读空也
-        会在终端帧到达后返回，不会空转。
+        或显式取消/脱离。
+        保活：空闲超过 _HEARTBEAT_SECONDS 时发一条 SSE 注释帧 ": ping"，既让代理/浏览器别按
+        空闲掐断长连接，也让停留确认时连接保持可写（真正的断开只在「写」时报错被感知）。
+        本方法每轮都把 _last_consumer_seen 刷到当前——前台连着读即视为有人在看，reaper 不回收。
         """
+        last_sent = time.monotonic()
         while not self._cancelled.is_set():
+            self._last_consumer_seen = time.monotonic()
             try:
                 frame = self.msg_queue.get(timeout=0.5)
             except queue.Empty:
+                if time.monotonic() - last_sent >= _HEARTBEAT_SECONDS:
+                    last_sent = time.monotonic()
+                    yield ": ping\n\n"
                 continue
+            last_sent = time.monotonic()
             yield frame
             if frame.startswith("data: ") and json.loads(frame[6:-2]).get("type") in ("done", "error"):
+                # 以终端帧自然结束：打标记，generate 收尾据此幂等释放注册表槽位（详见 dispose/worker finally）
+                self._done_seen = True
                 return
 
     def _push(self, data: dict) -> None:
@@ -360,7 +465,11 @@ class ChatSession:
         self.decision_queue.put({"confirm_id": "__cancel__", "allow": False})
 
     def dispose(self) -> None:
-        """释放：join worker 线程（可重复调用）。MCP 已在 worker finally 关闭，注册表由调用方清。"""
+        """join worker 线程（可重复调用）。MCP 已在 worker finally 关闭。
+
+        cancel+dispose 是「停止 run」专用路径（POST /chat/stop）：worker 被唤醒后自注销；
+        若 join 超时（模型长调用未及时归位），调用方仍需显式 unregister 兜底释放槽位。
+        普通 SSE 断开不调本方法——那是「脱离」，run 继续后台跑并由 worker 自注销收尾。"""
         self.cancel()
         if self._thread is not None and self._thread.is_alive():
             self._thread.join(timeout=8)
@@ -378,13 +487,55 @@ def active_session(task_id: int) -> "ChatSession | None":
 
 
 def register(task_id: int, sess: "ChatSession") -> bool:
-    """登记会话；已有活动会话 → False（端点据此 409）。"""
+    """登记会话；已有活动会话 → False（端点据此 409）。首个成功登记时懒启动孤儿回收守护。"""
     with _registry_lock:
         if task_id in _sessions:
             return False
         _sessions[task_id] = sess
+        _ensure_reaper()
         return True
 
 
 def unregister(task_id: int) -> None:
     _sessions.pop(task_id, None)
+
+
+# 孤儿 park 会话回收守护（保活设计的配套防泄漏）：
+# 保活改造后 SSE 断开不再取消 run；若 run 停在一个「无人认领」的确认上且用户不再回来，
+#   活动槽会被永久占用（再次 chat → 永久 409，即最初卡死问题）。本守护定时扫描：凡「停在待
+#   回执确认」且消费端 beat（_last_consumer_seen）超过 _CONSUMER_TTL 未刷新 → cancel 唤醒 worker
+#   → worker finally 自注销，槽位自动释放。只回收 park 的会话；正常后台 run 跑完即自注销，不受影响。
+_reap_started = False
+_reap_lock = threading.Lock()
+
+
+def _ensure_reaper() -> None:
+    """进程内单例：首个成功 register 时懒启动回收线程（纯单元场景不打扰）。"""
+    global _reap_started
+    with _reap_lock:
+        if _reap_started:
+            return
+        _reap_started = True
+    threading.Thread(target=_reap_loop, name="ls-session-reaper", daemon=True).start()
+
+
+def _reap_loop() -> None:
+    while True:
+        time.sleep(_REAP_INTERVAL)
+        _reap_once()
+
+
+def _reap_once() -> None:
+    """扫一遍注册表：回收「停驻待确认且消费端长期无 beat」的孤儿会话。单测可直接调用。
+
+    被回收 = cancel 该会话 → worker 的决策等待被唤醒返回 None → worker finally 自注销，
+    槽位自动释放（端点无需干预）。单次扫描绝不因个别异常中断其余项。"""
+    try:
+        with _registry_lock:
+            snapshot = list(_sessions.values())
+        now = time.monotonic()
+        for sess in snapshot:
+            if sess.is_parked() and (now - sess._last_consumer_seen) > _CONSUMER_TTL:
+                sess.cancel()
+    except Exception:  # noqa: BLE001 —— 单次扫描绝不因异常退出
+        pass

@@ -26,8 +26,13 @@ def _clean_role(role) -> str:
     return role
 
 
-def add_message(task_id: int, role: str, content: str, run_id=None, model=None) -> dict:
-    """记一条消息并落库；任务不存在 → 404。run_id/model 可空（如任务预置消息）。"""
+def add_message(task_id: int, role: str, content: str, run_id=None, model=None,
+                trace=None) -> dict:
+    """记一条消息并落库；任务不存在 → 404。run_id/model/trace 可空（如任务预置消息）。
+
+    trace（session-trace-ui）：仅助手消息携带有序过程步骤；None=纯文本/旧语义，
+    to_dict 仅当非 None 输出该字段（向后兼容）。
+    """
     task = get_task_or_raise(task_id)  # 防对不存在任务写历史
     msg = Message(
         task_id=task.id,
@@ -35,6 +40,7 @@ def add_message(task_id: int, role: str, content: str, run_id=None, model=None) 
         content=_clean_content(content),
         run_id=(run_id or None) and str(run_id),
         model=(model or None) and str(model),
+        trace=trace,
     )
     db.session.add(msg)
     db.session.commit()
@@ -45,8 +51,10 @@ def add_user_message(task_id: int, content: str, run_id=None, model=None) -> dic
     return add_message(task_id, "user", content, run_id=run_id, model=model)
 
 
-def add_assistant_message(task_id: int, content: str, run_id=None, model=None) -> dict:
-    return add_message(task_id, "assistant", content, run_id=run_id, model=model)
+def add_assistant_message(task_id: int, content: str, run_id=None, model=None,
+                          trace=None) -> dict:
+    return add_message(task_id, "assistant", content, run_id=run_id, model=model,
+                       trace=trace)
 
 
 def list_messages(task_id: int) -> list[dict]:

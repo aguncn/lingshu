@@ -5,8 +5,24 @@
 from sqlalchemy import select
 
 from ..extensions import db
-from ..models import EXPERT_ROLES, Expert
+from ..models import (
+    EXPERT_ROLES,
+    Expert,
+    KnowledgeBase,
+    LibraryFile,
+    MCPConnector,
+    ModelProvider,
+    Skill,
+)
 from .errors import NotFoundError, ValidationError
+
+# 档案预设 id 数组 → 目标实体模型（C5）：create/update 写库前校验存在性，避免悬空引用。
+_PRESET_SPEC = {
+    "preset_skills": Skill,
+    "preset_mcp": MCPConnector,
+    "preset_kb": KnowledgeBase,
+    "preset_library": LibraryFile,
+}
 
 
 def _clean_required(value, field: str) -> str:
@@ -69,6 +85,50 @@ def _parse_composed(value, exclude_id: int | None = None) -> list[int]:
     return ids
 
 
+def _parse_preset_ids(value, field: str) -> list[int]:
+    """校验并归一档案预设 id 数组 → 保持请求顺序去重；None/空 = 无该维预设。
+
+    与 _parse_composed 同构但不涉及「排除自身」：元素须为正整数、同数组不重复、
+    每个 id 在对应实体表存在（_PRESET_SPEC 决定表）。全部通过才返回，任一非法即抛 400。
+    """
+    if value is None:
+        return []
+    if not isinstance(value, list):
+        raise ValidationError(f"{field} 必须为 id 数组")
+    seen: set[int] = set()
+    ids: list[int] = []
+    for elem in value:
+        if isinstance(elem, bool) or not isinstance(elem, int):
+            raise ValidationError(f"{field} 元素必须为正整数 id，收到：{elem!r}")
+        if elem <= 0:
+            raise ValidationError(f"{field} 元素必须为正整数 id，收到：{elem}")
+        if elem in seen:
+            raise ValidationError(f"{field} 内重复 id：{elem}")
+        seen.add(elem)
+        ids.append(elem)
+    if ids:
+        model = _PRESET_SPEC[field]
+        existing = set(
+            db.session.execute(select(model.id).where(model.id.in_(ids))).scalars()
+        )
+        missing = set(ids) - existing
+        if missing:
+            raise ValidationError(f"{field} 存在不存在的实体 id：{sorted(missing)}")
+    return ids
+
+
+def _clean_provider_id(value, field: str):
+    """校验可选默认模型供应商 id：None/空 → None；否则须为现存供应商正整数 id。"""
+    if value is None or value == "":
+        return None
+    if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
+        raise ValidationError(f"{field} 必须为正整数供应商 id，收到：{value!r}")
+    exists = db.session.get(ModelProvider, value)
+    if exists is None:
+        raise ValidationError(f"{field} 指向不存在的供应商 id：{value}")
+    return value
+
+
 def _resolve_children(composed: list[int]) -> list[dict]:
     """把子专家 id 列表解析为 {id,name,role}，保持原顺序（detail 出口用）。"""
     if not composed:
@@ -102,6 +162,12 @@ def create_expert(
     description=None,
     system_prompt=None,
     role=None,
+    preset_skills=None,
+    preset_mcp=None,
+    preset_kb=None,
+    preset_library=None,
+    default_provider_id=None,
+    default_model_name=None,
     composed_of=None,
     enabled=None,
 ) -> dict:
@@ -118,6 +184,12 @@ def create_expert(
         description=(description or "").strip() or None,
         system_prompt=(system_prompt or "").strip() or None,
         role=cleaned_role,
+        preset_skills=_parse_preset_ids(preset_skills, "preset_skills"),
+        preset_mcp=_parse_preset_ids(preset_mcp, "preset_mcp"),
+        preset_kb=_parse_preset_ids(preset_kb, "preset_kb"),
+        preset_library=_parse_preset_ids(preset_library, "preset_library"),
+        default_provider_id=_clean_provider_id(default_provider_id, "default_provider_id"),
+        default_model_name=(default_model_name or "").strip() or None,
         composed_of=_parse_composed(composed_of),
         enabled=True if enabled is None else _as_bool(enabled, "enabled"),
     )
@@ -132,7 +204,10 @@ def update_expert(expert_id: int, **fields) -> dict:
     if not fields:
         raise ValidationError("没有可更新的字段")
     unknown = set(fields) - {
-        "name", "description", "system_prompt", "role", "composed_of", "enabled",
+        "name", "description", "system_prompt", "role",
+        "preset_skills", "preset_mcp", "preset_kb", "preset_library",
+        "default_provider_id", "default_model_name",
+        "composed_of", "enabled",
     }
     if unknown:
         raise ValidationError(f"未知字段：{sorted(unknown)}")
@@ -153,6 +228,15 @@ def update_expert(expert_id: int, **fields) -> dict:
                 f"role 取值非法：{cleaned_role}（应为 {sorted(EXPERT_ROLES)} 之一）"
             )
         expert.role = cleaned_role
+    for preset in ("preset_skills", "preset_mcp", "preset_kb", "preset_library"):
+        if preset in fields:
+            setattr(expert, preset, _parse_preset_ids(fields[preset], preset))
+    if "default_provider_id" in fields:
+        expert.default_provider_id = _clean_provider_id(
+            fields["default_provider_id"], "default_provider_id"
+        )
+    if "default_model_name" in fields:
+        expert.default_model_name = (fields["default_model_name"] or "").strip() or None
     if "composed_of" in fields:
         expert.composed_of = _parse_composed(fields["composed_of"], exclude_id=expert.id)
     if "enabled" in fields:

@@ -70,6 +70,7 @@ def create_task(sid: int):
         task_type=body.get("task_type"),
         visibility=body.get("visibility"),
         model_config_id=body.get("model_config_id"),
+        permission_mode=body.get("permission_mode"),
     )
     return task, 201
 
@@ -84,7 +85,10 @@ def get_task(task_id: int):
 def update_task(task_id: int):
     body = _body()
     # 仅透传请求里出现的可更新字段，未出现则不改（部分更新）
-    keys = ("title", "task_type", "status", "visibility", "scenario_domain", "model_config_id")
+    keys = (
+        "title", "task_type", "status", "visibility",
+        "model_config_id", "permission_mode",
+    )
     fields = {k: body.get(k) for k in keys if k in body}
     return task_service.update_task(task_id, **fields)
 

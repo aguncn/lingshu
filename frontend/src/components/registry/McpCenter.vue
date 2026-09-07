@@ -164,7 +164,7 @@ function transportLabel(t) { return metaOf(MCP_TRANSPORT_META, t).label }
 </script>
 
 <template>
-  <div class="rc">
+  <div class="rc rc-mcps">
     <div class="rc-head">
       <span class="rc-title">MCP 连接器</span>
       <span v-if="list.length" class="rc-count">{{ list.length }}</span>
@@ -289,16 +289,29 @@ function transportLabel(t) { return metaOf(MCP_TRANSPORT_META, t).label }
 .rc-count { font-size: 11px; color: var(--ls-fg-dim); background: rgba(127,132,148,.18); border-radius: 999px; padding: 0 6px; }
 .rc-add { margin-left: auto; }
 .rc-body { flex: 1 1 auto; min-height: 0; overflow-y: auto; }
-.rc-list { display: flex; flex-direction: column; gap: 4px; }
-.rc-item { border: 1px solid var(--ls-border); border-radius: 8px; background: var(--ls-bg); padding: 9px 10px 8px; }
+.rc-list { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; align-content: start; }
+.rc-item { display: flex; flex-direction: column; border: 1px solid var(--ls-border); border-radius: 8px; background: var(--ls-bg); padding: 10px 12px 0; }
 .rc-item-main.no-btn { display: flex; }
 .rc-txt { flex: 1 1 auto; min-width: 0; }
 .rc-line1 { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
 .rc-name { font-size: 13px; font-weight: 600; }
 .rc-sub { font-size: 12px; color: var(--ls-fg-dim); margin-top: 2px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.rc-ops { display: flex; align-items: center; gap: 2px; margin-top: 6px; }
+.rc-ops { display: flex; align-items: center; gap: 2px; margin-top: 6px; padding: 6px 0 8px; border-top: 1px dashed var(--ls-border); flex-wrap: wrap; }
 .rc-clear { margin-top: 2px; }
 .rc-test-note { font-size: 13px; }
 .rc-tools { margin: 6px 0 0; padding-left: 18px; font-size: 12.5px; }
 .rc-tools code { background: rgba(127,132,148,.15); padding: 0 4px; border-radius: 3px; }
+
+/* —— C6 版末：每类能力一套强调色（MCP=cyan）。卡片 = 顶缘彩线 + 浅彩卡底；
+     名称/操作行压淡，中部连接信息与指标行着彩出挑；hover 轻浮起 —— */
+.rc-list { grid-template-columns: repeat(2, minmax(0, 1fr)); column-gap: 14px; row-gap: 14px; }
+.rc-item {
+  border-top: 2px solid var(--cc);
+  background: var(--cc-soft);
+  transition: border-color 0.15s, box-shadow 0.15s, transform 0.15s;
+}
+.rc-item:hover { border-color: var(--cc); box-shadow: 0 4px 14px rgba(15, 23, 42, 0.1); transform: translateY(-1px); }
+.rc-name { color: var(--ls-fg-dim); }
+.rc-sub { color: var(--cc); font-weight: 600; }
+.rc-count { color: var(--cc); background: var(--cc-soft2); }
 </style>
